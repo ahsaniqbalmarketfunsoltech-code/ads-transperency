@@ -8,3 +8,6 @@ credentials.json
 .DS_Store
 Thumbs.db
 
+# Dependencies
+node_modules/
+
