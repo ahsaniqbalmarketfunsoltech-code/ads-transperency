@@ -18,7 +18,7 @@ on:
     types: [sheet_update]
 
 concurrency:
-  group: scraping-group
+  group: global-scraping-locked
   cancel-in-progress: true
 
 jobs:
