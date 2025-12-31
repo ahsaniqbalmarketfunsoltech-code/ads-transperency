@@ -142,14 +142,15 @@ async function extractAppData(url, browser, attempt = 1) {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const cleanName = (name) => {
         if (!name) return 'NOT_FOUND';
-        // 1. Remove the weird Google variation separator
-        let cleaned = name.split('!@~!@~')[0].trim();
-        // 2. If it repeats like "Name | Name", take only the first part
-        if (cleaned.includes(' | ')) {
-            const parts = cleaned.split(' | ');
-            if (parts[0].trim().toLowerCase() === parts[1].trim().toLowerCase()) {
-                cleaned = parts[0].trim();
-            }
+        // 1. Remove invisible Unicode control characters (like U+2066, U+2069)
+        let cleaned = name.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '').trim();
+        // 2. Remove the Google variation separator
+        cleaned = cleaned.split('!@~!@~')[0].trim();
+        // 3. Robust Duplicate Remover (e.g. "A | A" or "A | B | A")
+        if (cleaned.includes('|')) {
+            const parts = cleaned.split('|').map(p => p.trim()).filter(p => p.length > 0);
+            const uniqueParts = [...new Set(parts)];
+            cleaned = uniqueParts[0]; // Take the first unique headline
         }
         return cleaned;
     };
