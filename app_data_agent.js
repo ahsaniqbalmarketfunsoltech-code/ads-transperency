@@ -8,7 +8,7 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1beJ263B3m4L8pgD9RWsls-orKLUvLMfT2kExaiyNl7g';
 const SHEET_NAME = 'App data'; // Separate sheet for this agent
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = 6;
+const CONCURRENT_PAGES = 3; // Reduced for stealth
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
 const RETRY_WAIT_MULTIPLIER = 1.5;
@@ -94,6 +94,7 @@ async function triggerSelfRestart() {
     const token = process.env.GH_TOKEN;
     if (!repo || !token) return;
 
+    console.log(`\n🔄 Triggering auto-restart for App data...`);
     const https = require('https');
     const data = JSON.stringify({ event_type: 'app_data_trigger' });
     const options = {
@@ -125,10 +126,12 @@ async function extractAppData(url, browser, attempt = 1) {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
     try {
+        console.log(`  🚀 Loading: ${url.substring(0, 60)}...`);
         await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
         const content = await page.content();
-        if (content.includes('Our systems have detected unusual traffic')) {
+        if (content.includes('Our systems have detected unusual traffic') || content.includes('Too Many Requests')) {
+            console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic. Stopping batch.');
             await page.close();
             return { appName: 'BLOCKED', storeLink: 'BLOCKED' };
         }
@@ -137,10 +140,11 @@ async function extractAppData(url, browser, attempt = 1) {
         await sleep(baseWait);
 
         await page.evaluate(async () => {
-            window.scrollBy(0, 500);
+            window.scrollBy(0, 800);
             await new Promise(r => setTimeout(r, 500));
-            window.scrollBy(0, -500);
+            window.scrollBy(0, -800);
         });
+        await sleep(1500);
 
         const frames = page.frames();
         for (const frame of frames) {
@@ -153,18 +157,36 @@ async function extractAppData(url, browser, attempt = 1) {
                     const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
                     if (xpRes && xpRes.href) data.storeLink = xpRes.href;
 
-                    const linkSelectors = ['a[data-asoch-targets*="ochAppName"]', 'a.ns-sbqu4-e-75[href*="googleadservices"]', 'a[href*="googleadservices.com/pagead/aclk"]'];
+                    const linkSelectors = [
+                        'a[data-asoch-targets*="ochAppName"]',
+                        'a[data-asoch-targets*="ochInstallButton"]',
+                        'a.ns-sbqu4-e-75[href*="googleadservices"]',
+                        'a[href*="googleadservices.com/pagead/aclk"]',
+                        'a[href*="play.google.com/store/apps/details"]'
+                    ];
                     if (!data.storeLink) {
                         for (const sel of linkSelectors) {
                             const el = root.querySelector(sel);
-                            if (el && el.href) { data.storeLink = el.href; break; }
+                            if (el && el.href && !el.href.includes('javascript:')) {
+                                data.storeLink = el.href;
+                                break;
+                            }
                         }
                     }
 
-                    const nameSelectors = ['a[data-asoch-targets*="ochAppName"]', '.short-app-name a', 'div[class*="app-name"]'];
+                    const nameSelectors = [
+                        'a[data-asoch-targets*="ochAppName"]',
+                        '.short-app-name a',
+                        'div[class*="app-name"]',
+                        'span[class*="app-name"]',
+                        '.app-title'
+                    ];
                     for (const sel of nameSelectors) {
                         const el = root.querySelector(sel);
-                        if (el && el.innerText.trim()) { data.appName = el.innerText.trim(); break; }
+                        if (el && el.innerText.trim()) {
+                            data.appName = el.innerText.trim();
+                            break;
+                        }
                     }
                     return data;
                 });
@@ -191,6 +213,7 @@ async function extractAppData(url, browser, attempt = 1) {
         await page.close();
         return result;
     } catch (err) {
+        console.error(`  ❌ Error: ${err.message}`);
         await page.close();
         return { appName: 'ERROR', storeLink: 'ERROR' };
     }
@@ -199,8 +222,9 @@ async function extractAppData(url, browser, attempt = 1) {
 async function extractWithRetry(url, browser) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         const data = await extractAppData(url, browser, attempt);
+        if (data.appName === 'BLOCKED') return data;
         if (data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND') return data;
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 3000 + Math.random() * 2000));
     }
     return { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
 }
@@ -209,7 +233,7 @@ async function extractWithRetry(url, browser) {
 // MAIN EXECUTION
 // ============================================
 (async () => {
-    console.log(`🤖 Starting App Data Agent (Sheet: App data)...\n`);
+    console.log(`🤖 Starting Safety App Data Agent (Sheet: App data)...\n`);
     const sessionStartTime = Date.now();
     const MAX_RUNTIME = 330 * 60 * 1000;
 
@@ -237,14 +261,22 @@ async function extractWithRetry(url, browser) {
         }
 
         const batch = toProcess.slice(i, i + CONCURRENT_PAGES);
+        console.log(`📦 Batch ${Math.floor(i / CONCURRENT_PAGES) + 1}/${Math.ceil(toProcess.length / CONCURRENT_PAGES)}`);
+
         const results = await Promise.all(batch.map(async (item) => {
-            console.log(`  🔗 Processing: ${item.url.substring(0, 40)}...`);
             const data = await extractWithRetry(item.url, browser);
-            console.log(`  ✅ Result: [${data.appName}]`);
             return { url: item.url, ...data };
         }));
 
+        if (results.some(r => r.appName === 'BLOCKED')) {
+            console.log('🛑 Block detected. Restarting for fresh IP...');
+            await browser.close();
+            await triggerSelfRestart();
+            process.exit(0);
+        }
+
         await safeBatchWrite(sheets, results);
+        await new Promise(r => setTimeout(r, 2000));
     }
 
     await browser.close();
