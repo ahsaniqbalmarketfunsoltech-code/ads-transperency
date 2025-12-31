@@ -148,6 +148,12 @@ async function extractAppData(url, browser, attempt = 1) {
         console.log(`  🚀 Loading: ${url.substring(0, 60)}...`);
         await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
+        // 1. Capture the "Advertiser Name" from the main page to use as a blacklist
+        const blacklistName = await page.evaluate(() => {
+            const topTitle = document.querySelector('h1, .advertiser-name, .ad-details-heading');
+            return topTitle ? topTitle.innerText.trim().toLowerCase() : '';
+        });
+
         const content = await page.content();
         if (content.includes('Our systems have detected unusual traffic') || content.includes('Too Many Requests')) {
             console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic. Stopping batch.');
@@ -168,7 +174,7 @@ async function extractAppData(url, browser, attempt = 1) {
         const frames = page.frames();
         for (const frame of frames) {
             try {
-                const frameData = await frame.evaluate(() => {
+                const frameData = await frame.evaluate((blacklist) => {
                     const data = { appName: null, storeLink: null };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
@@ -180,7 +186,7 @@ async function extractAppData(url, browser, attempt = 1) {
                     const linkSelectors = [
                         'a[data-asoch-targets*="ochAppName"]',
                         'a[data-asoch-targets*="ochInstallButton"]',
-                        'a[data-asoch-targets*="ctaButton"]', // Common in text ads
+                        'a[data-asoch-targets*="ctaButton"]',
                         'a.ns-sbqu4-e-75[href*="googleadservices"]',
                         'a.install-button-anchor[href*="googleadservices"]',
                         'a[href*="googleadservices.com/pagead/aclk"]',
@@ -198,61 +204,32 @@ async function extractAppData(url, browser, attempt = 1) {
                         }
                     }
 
-                    // Fallback Link: Any link that looks like a destination (not google internal)
-                    if (!data.storeLink) {
-                        const allLinks = Array.from(root.querySelectorAll('a[href]'));
-                        const destLink = allLinks.find(a => {
-                            const h = a.href.toLowerCase();
-                            return !h.includes('google.com') &&
-                                !h.includes('youtube.com') &&
-                                !h.includes('javascript:') &&
-                                h.startsWith('http');
-                        });
-
-                        // If no non-google link, try specific aclk link as last resort
-                        if (!destLink) {
-                            const aclk = allLinks.find(a => a.href.includes('googleadservices.com/pagead/aclk'));
-                            if (aclk) data.storeLink = aclk.href;
-                        } else {
-                            data.storeLink = destLink.href;
-                        }
-                    }
-
-                    // App Name / Brand Name Selectors (Expanded for Text & Video Ads)
+                    // NAME EXTRACTION (With Blacklist)
                     const nameSelectors = [
                         'a[data-asoch-targets*="ochAppName"]',
                         'a[data-asoch-targets*="AdTitle"]',
-                        '[role="heading"] span', // Targeted for the "Plant Identifier" style ads
-                        '[role="link"] span',    // Targeted fallback for headlines
+                        '[role="heading"] span',
+                        '[role="link"] span',
                         '.short-app-name a',
                         'div[class*="app-name"]',
                         'span[class*="app-name"]',
-                        '.app-title',
-                        '.advertiser-name',
-                        'h1', 'h2'
+                        '.app-title'
                     ];
 
-                    // Special Search: If no name found yet, look for the largest span in the container
-                    if (root !== document.body) {
-                        for (const sel of nameSelectors) {
-                            const el = root.querySelector(sel);
-                            if (el && el.innerText.trim().length > 2) {
-                                data.appName = el.innerText.trim();
-                                break;
-                            }
-                        }
-                    } else {
-                        // Fallback logic for name if still null
-                        for (const sel of nameSelectors) {
-                            const el = document.querySelector(sel);
-                            if (el && el.innerText.trim()) {
-                                data.appName = el.innerText.trim();
-                                break;
+                    for (const sel of nameSelectors) {
+                        const elements = root.querySelectorAll(sel);
+                        for (const el of elements) {
+                            const txt = el.innerText.trim();
+                            // ONLY accept if NOT the blacklisted advertiser name
+                            if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
+                                data.appName = txt;
+                                return data;
                             }
                         }
                     }
                     return data;
-                });
+                }, blacklistName);
+
                 if (frameData.storeLink && result.storeLink === 'NOT_FOUND') result.storeLink = frameData.storeLink;
                 if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = frameData.appName;
                 if (result.storeLink !== 'NOT_FOUND' && result.appName !== 'NOT_FOUND') break;
