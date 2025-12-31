@@ -136,16 +136,41 @@ async function extractAppData(url, browser, attempt = 1) {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     let result = { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
 
+    // Set a realistic User-Agent to avoid early detection
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
     try {
         console.log(`  🚀 Loading: ${url.substring(0, 60)}...`);
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: MAX_WAIT_TIME });
 
-        await sleep(3000 * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1));
+        // Reverting to networkidle0 for maximum safety - wait for all ad resources
+        await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
-        // Scroll slightly to trigger any lazy elements
-        await page.evaluate(() => window.scrollTo(0, 500));
-        await sleep(500);
-        await page.evaluate(() => window.scrollTo(0, 0));
+        // Check if blocked by "Sorry" page or "Too many requests"
+        const content = await page.content();
+        if (content.includes('Our systems have detected unusual traffic') || content.includes('Too Many Requests')) {
+            console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic. Stopping batch.');
+            await page.close();
+            return { appName: 'BLOCKED', storeLink: 'BLOCKED' };
+        }
+
+        // Wait for the main ad container or at least some basic page structure
+        try {
+            await page.waitForSelector('ad-creative-preview, .creative-preview-container', { timeout: 10000 });
+        } catch (e) {
+            console.log('  🕒 Main container slow to appear, continuing...');
+        }
+
+        // Base wait: Increase significantly for stability
+        const baseWait = 8000 * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
+        await sleep(baseWait);
+
+        // Robust Scroll
+        await page.evaluate(async () => {
+            window.scrollBy(0, 800);
+            await new Promise(r => setTimeout(r, 500));
+            window.scrollBy(0, -800);
+        });
+        await sleep(1500);
 
         const frames = page.frames();
         for (const frame of frames) {
@@ -153,40 +178,44 @@ async function extractAppData(url, browser, attempt = 1) {
                 const frameData = await frame.evaluate(() => {
                     const data = { appName: null, storeLink: null };
 
-                    // Focus ONLY on the ad details container to avoid "Related Ads"
-                    const container = document.querySelector('#portrait-landscape-phone') || document.body;
+                    // Search in the whole doc first to be safe, then try specific container
+                    const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                    // App Link - Selectors from friend's code + specific ID
+                    // App Link Selectors
+                    const linkSelectors = [
+                        'a[data-asoch-targets*="ochAppName"]',
+                        'a[data-asoch-targets*="ochInstallButton"]',
+                        'a.ns-sbqu4-e-75[href*="googleadservices"]',
+                        'a.install-button-anchor[href*="googleadservices"]',
+                        'a[href*="googleadservices.com/pagead/aclk"]',
+                        'a[href*="play.google.com/store/apps/details"]'
+                    ];
+
+                    // Try XPath found in user logic
                     const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
                     const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
                     if (xpRes && xpRes.href) data.storeLink = xpRes.href;
 
-                    const linkSelectors = [
-                        'a[data-asoch-targets*="ochAppName"]',
-                        'a.ns-sbqu4-e-75[href*="googleadservices"]',
-                        'a.install-button-anchor[href*="googleadservices"]',
-                        'a[href*="googleadservices.com/pagead/aclk"]'
-                    ];
-
                     if (!data.storeLink) {
                         for (const sel of linkSelectors) {
-                            const el = container.querySelector(sel);
-                            if (el && el.href) {
+                            const el = root.querySelector(sel);
+                            if (el && el.href && !el.href.includes('javascript:')) {
                                 data.storeLink = el.href;
                                 break;
                             }
                         }
                     }
 
-                    // App Name
+                    // App Name Selectors
                     const nameSelectors = [
                         'a[data-asoch-targets*="ochAppName"]',
                         '.short-app-name a',
                         'div[class*="app-name"]',
-                        'span[class*="app-name"]'
+                        'span[class*="app-name"]',
+                        '.app-title'
                     ];
                     for (const sel of nameSelectors) {
-                        const el = container.querySelector(sel);
+                        const el = root.querySelector(sel);
                         if (el && el.innerText.trim()) {
                             data.appName = el.innerText.trim();
                             break;
@@ -197,22 +226,25 @@ async function extractAppData(url, browser, attempt = 1) {
 
                 if (frameData.storeLink && result.storeLink === 'NOT_FOUND') result.storeLink = frameData.storeLink;
                 if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = frameData.appName;
+
+                // If we found both, stop searching frames
                 if (result.storeLink !== 'NOT_FOUND' && result.appName !== 'NOT_FOUND') break;
             } catch (e) { }
         }
 
-        // RegEx fallback for the link
+        // RegEx fallback for the link from full page source
         if (result.storeLink === 'NOT_FOUND') {
-            const html = await page.content();
-            const matches = html.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
+            const pageSource = await page.content();
+            const matches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
             if (matches) result.storeLink = matches[0];
         }
 
-        // Direct store link cleanup
+        // Cleanup Redirects (get direct Play Store/App Store link)
         if (result.storeLink !== 'NOT_FOUND' && result.storeLink.includes('adurl=')) {
             try {
-                const adUrl = new URL(result.storeLink).searchParams.get('adurl');
-                if (adUrl) result.storeLink = adUrl;
+                const urlObj = new URL(result.storeLink);
+                const adUrl = urlObj.searchParams.get('adurl');
+                if (adUrl && adUrl.startsWith('http')) result.storeLink = adUrl;
             } catch (e) { }
         }
 
