@@ -249,12 +249,27 @@ async function extractAppData(url, browser, attempt = 1) {
             } catch (e) { }
         }
 
+        // RegEx fallback for the link from full page source
+        const pageSource = await page.content();
         if (result.storeLink === 'NOT_FOUND') {
-            const pageSource = await page.content();
             const matches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
             if (matches) result.storeLink = matches[0];
         }
 
+        // HEURISTIC: Search for Android Package Names (com.xxx) in the source code
+        if (result.storeLink === 'NOT_FOUND' || result.storeLink.includes('googleadservices')) {
+            // Find patterns like "com.company.app" inside quotes
+            const packageMatch = pageSource.match(/["'](com\.[a-z0-9_]+\.[a-z0-9_][a-z0-9_.]+)["']/i);
+            if (packageMatch && packageMatch[1]) {
+                const pkg = packageMatch[1].replace(/\.$/, '');
+                // Check if it looks like a real package (at least 2 dots, e.g. com.example.app)
+                if ((pkg.match(/\./g) || []).length >= 2) {
+                    result.storeLink = `https://play.google.com/store/apps/details?id=${pkg}`;
+                }
+            }
+        }
+
+        // Direct store link cleanup
         if (result.storeLink !== 'NOT_FOUND' && result.storeLink.includes('adurl=')) {
             try {
                 const urlObj = new URL(result.storeLink);
