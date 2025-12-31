@@ -140,6 +140,19 @@ async function triggerSelfRestart() {
 async function extractAppData(url, browser, attempt = 1) {
     const page = await browser.newPage();
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const cleanName = (name) => {
+        if (!name) return 'NOT_FOUND';
+        // 1. Remove the weird Google variation separator
+        let cleaned = name.split('!@~!@~')[0].trim();
+        // 2. If it repeats like "Name | Name", take only the first part
+        if (cleaned.includes(' | ')) {
+            const parts = cleaned.split(' | ');
+            if (parts[0].trim().toLowerCase() === parts[1].trim().toLowerCase()) {
+                cleaned = parts[0].trim();
+            }
+        }
+        return cleaned;
+    };
     let result = { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
 
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -231,7 +244,7 @@ async function extractAppData(url, browser, attempt = 1) {
                 }, blacklistName);
 
                 if (frameData.storeLink && result.storeLink === 'NOT_FOUND') result.storeLink = frameData.storeLink;
-                if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = frameData.appName;
+                if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = cleanName(frameData.appName);
                 if (result.storeLink !== 'NOT_FOUND' && result.appName !== 'NOT_FOUND') break;
             } catch (e) { }
         }
