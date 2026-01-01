@@ -8,7 +8,7 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1beJ263B3m4L8pgD9RWsls-orKLUvLMfT2kExaiyNl7g';
 const SHEET_NAME = 'App data'; // Separate sheet for this agent
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = 1; // CRITICAL: Sequential only to avoid detection
+const CONCURRENT_PAGES = 3; // 3 parallel requests per batch
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
 const RETRY_WAIT_MULTIPLIER = 1.5;
@@ -197,8 +197,8 @@ async function extractAppData(url, browser, attempt = 1) {
     try {
         console.log(`  🚀 Loading (${viewport.width}x${viewport.height}): ${url.substring(0, 50)}...`);
 
-        // ANTI-DETECTION: Random delay before navigation (2-5 seconds)
-        await randomDelay(2000, 5000);
+        // ANTI-DETECTION: Short random delay before navigation (1-2 seconds)
+        await randomDelay(1000, 2000);
 
         await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
@@ -215,8 +215,8 @@ async function extractAppData(url, browser, attempt = 1) {
             return { appName: 'BLOCKED', storeLink: 'BLOCKED' };
         }
 
-        // ANTI-DETECTION: Random wait with jitter (8-15 seconds)
-        const baseWait = 8000 + Math.random() * 7000;
+        // ANTI-DETECTION: Random wait with jitter (3-5 seconds)
+        const baseWait = 3000 + Math.random() * 2000;
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
@@ -235,7 +235,7 @@ async function extractAppData(url, browser, attempt = 1) {
             await sleep(300 + Math.random() * 500);
         } catch (e) { }
 
-        await randomDelay(1500, 3000);
+        await randomDelay(500, 1000);
 
         const frames = page.frames();
         for (const frame of frames) {
@@ -345,8 +345,8 @@ async function extractWithRetry(url, browser) {
         const data = await extractAppData(url, browser, attempt);
         if (data.appName === 'BLOCKED') return data;
         if (data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND') return data;
-        // ANTI-DETECTION: Longer random wait between retries (5-10 seconds)
-        await randomDelay(5000, 10000);
+        // Random wait between retries (2-4 seconds)
+        await randomDelay(2000, 4000);
     }
     return { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
 }
@@ -399,9 +399,9 @@ async function extractWithRetry(url, browser) {
 
         await safeBatchWrite(sheets, results);
 
-        // ANTI-DETECTION: Long random delay between batches (8-20 seconds)
-        const batchDelay = 8000 + Math.random() * 12000;
-        console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s before next request...`);
+        // Random delay between batches (3-6 seconds)
+        const batchDelay = 3000 + Math.random() * 3000;
+        console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s before next batch...`);
         await new Promise(r => setTimeout(r, batchDelay));
     }
 
