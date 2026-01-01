@@ -311,28 +311,21 @@ async function extractAppData(url, browser, attempt = 1) {
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
                     // Helper to clean/extract real link from an href
+                    // SIMPLIFIED: Only accept DIRECT Play Store or iTunes links
+                    // Do NOT decode googleadservices redirects (they often point to wrong apps)
                     const cleanLink = (href) => {
                         if (!href || href.includes('javascript:')) return null;
 
-                        // 1. Direct Store Links (Strict Check)
+                        // ONLY accept direct store links
                         if (href.includes('play.google.com') || href.includes('itunes.apple.com')) {
+                            // Make sure it's not a googleadservices redirect containing the store link
+                            if (href.includes('googleadservices') || href.includes('/pagead/aclk')) {
+                                return null; // Don't trust redirect links
+                            }
                             return href;
                         }
 
-                        // 2. Google Ad Services Redirects (extract 'adurl' and validate STRICTLY)
-                        if (href.includes('googleadservices') || href.includes('/pagead/aclk')) {
-                            try {
-                                const m = href.match(/[\?&]adurl=([^&\s]+)/i);
-                                if (m && m[1]) {
-                                    const decoded = decodeURIComponent(m[1]);
-                                    // STRICT: Only accept if it is a Store Link
-                                    if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
-                                        return decoded;
-                                    }
-                                }
-                            } catch (e) { }
-                        }
-                        return null; // Return null if it's not a verified store link
+                        return null; // NOT_FOUND - no direct store link
                     };
 
                     // Helper to clean text and remove CSS garbage from app names
