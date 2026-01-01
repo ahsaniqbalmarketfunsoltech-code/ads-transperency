@@ -280,26 +280,25 @@ async function extractAppData(url, browser, attempt = 1) {
                     const cleanLink = (href) => {
                         if (!href || href.includes('javascript:')) return null;
 
-                        // 1. Direct Store Links
+                        // 1. Direct Store Links (Strict Check)
                         if (href.includes('play.google.com') || href.includes('itunes.apple.com')) {
                             return href;
                         }
 
-                        // 2. Google Ad Services Redirects (extract 'adurl')
+                        // 2. Google Ad Services Redirects (extract 'adurl' and validate STRICTLY)
                         if (href.includes('googleadservices') || href.includes('/pagead/aclk')) {
                             try {
                                 const m = href.match(/[\?&]adurl=([^&\s]+)/i);
                                 if (m && m[1]) {
                                     const decoded = decodeURIComponent(m[1]);
+                                    // STRICT: Only accept if it is a Store Link
                                     if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
                                         return decoded;
                                     }
-                                    // Even if it's not strictly play/itunes, return the decoded target if it looks like a valid http url
-                                    if (decoded.startsWith('http')) return decoded;
                                 }
                             } catch (e) { }
                         }
-                        return null; // Return null if we can't find a meaningful store link
+                        return null; // Return null if it's not a verified store link
                     };
 
                     // STRATEGY 1: Combined Extraction (Best Logic based on User Feedback)
@@ -331,7 +330,10 @@ async function extractAppData(url, browser, attempt = 1) {
                     if (!data.storeLink) {
                         const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
                         const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                        if (xpRes && xpRes.href) data.storeLink = xpRes.href;
+                        if (xpRes && xpRes.href) {
+                            const cleanXpLink = cleanLink(xpRes.href);
+                            if (cleanXpLink) data.storeLink = cleanXpLink;
+                        }
 
                         if (!data.storeLink) {
                             const linkSelectors = [
@@ -390,12 +392,25 @@ async function extractAppData(url, browser, attempt = 1) {
             } catch (e) { }
         }
 
-        // RegEx fallback for the link from full page source (using new_agent.js concept)
+        // RegEx fallback for the link from full page source (STRICT MODE)
+        // We only accept the fallback link if it explicitly contains play.google.com or itunes.apple.com
         if (result.storeLink === 'NOT_FOUND') {
             const pageSource = await page.content();
+            // Look for ad click links
             const matches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
-            if (matches) result.storeLink = matches[0];
+            if (matches) {
+                for (const match of matches) {
+                    try {
+                        const decoded = decodeURIComponent(match);
+                        if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
+                            result.storeLink = match; // Keep original link if it resolves to store
+                            break;
+                        }
+                    } catch (e) { }
+                }
+            }
         }
+
 
         // If we still don't have appName, try meta tags/title as fallback
         if (result.appName === 'NOT_FOUND') {
