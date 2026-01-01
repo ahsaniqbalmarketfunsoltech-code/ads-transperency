@@ -335,6 +335,29 @@ async function extractAppData(url, browser, attempt = 1) {
                         return null; // Return null if it's not a verified store link
                     };
 
+                    // Helper to clean text and remove CSS garbage from app names
+                    const cleanText = (text) => {
+                        if (!text) return null;
+                        let clean = text;
+
+                        // Remove CSS class-like patterns: .className-subClass-etc
+                        clean = clean.replace(/\.[\w-]+/g, ' ');
+
+                        // Remove CSS style patterns: font-size:16px; line-height:20px;
+                        clean = clean.replace(/[\w-]+:\s*[\w\d%px]+;?/g, ' ');
+
+                        // Remove asterisks used as separators in the garbage
+                        clean = clean.replace(/\*+/g, ' ');
+
+                        // Collapse multiple spaces and trim
+                        clean = clean.replace(/\s+/g, ' ').trim();
+
+                        // If what's left is too short, reject it
+                        if (clean.length < 3) return null;
+
+                        return clean;
+                    };
+
                     // CLASSIFICATION STRATEGY (Based on User Structure Observation)
                     // Video Ads: Name and Link are in the SAME anchor tag (ochAppName).
                     // Text Ads: Name is just text (no link), Link is separate or missing/in a different button.
@@ -346,7 +369,8 @@ async function extractAppData(url, browser, attempt = 1) {
                     const combinedEl = root.querySelector(combinedSelector);
 
                     if (combinedEl) {
-                        const txt = combinedEl.innerText.trim();
+                        const rawTxt = combinedEl.innerText.trim();
+                        const txt = cleanText(rawTxt); // Clean CSS garbage
                         // Check if name is valid (not blacklisted)
                         if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
                             const extractedLink = cleanLink(combinedEl.href);
@@ -380,7 +404,8 @@ async function extractAppData(url, browser, attempt = 1) {
                         for (const sel of nameSelectors) {
                             const elements = root.querySelectorAll(sel);
                             for (const el of elements) {
-                                const txt = el.innerText.trim();
+                                const rawTxt = el.innerText.trim();
+                                const txt = cleanText(rawTxt); // Clean CSS garbage
                                 if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
                                     data.appName = txt;
                                     break;
