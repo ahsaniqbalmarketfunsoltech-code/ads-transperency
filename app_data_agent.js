@@ -236,12 +236,33 @@ async function extractAppData(url, browser, attempt = 1) {
         // Also check if it's a video ad (checking for actual video element ONLY with valid dimensions)
         const mainPageInfo = await page.evaluate(() => {
             const topTitle = document.querySelector('h1, .advertiser-name, .ad-details-heading');
-            // Strict check: Video must exist AND be visible (larger than a pixel tracker)
-            const videoEl = document.querySelector('video');
-            const isVideo = videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10;
+
+            // Helper to check for video indicators
+            const checkVideo = () => {
+                // 1. Strict check: Video element with dimensions
+                const videoEl = document.querySelector('video');
+                if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
+
+                // 2. Format text check combined with visual indicators (Play button)
+                // If the text says "Format: Video", we look for a Play button to confirm it's actually a video
+                const formatText = document.body.innerText;
+                if (formatText.includes('Format: Video')) {
+                    // Check for Play buttons or overlays
+                    const playBtn = document.querySelector('[aria-label*="Play" i], .material-icons, .goog-icon');
+                    if (playBtn) {
+                        // Check if icon content is play_arrow or similar
+                        if (playBtn.innerText.includes('play_arrow') || playBtn.innerText.includes('play_circle')) return true;
+                        // Check aria label
+                        const label = playBtn.getAttribute('aria-label') || '';
+                        if (label.toLowerCase().includes('play')) return true;
+                    }
+                }
+                return false;
+            };
+
             return {
                 blacklist: topTitle ? topTitle.innerText.trim().toLowerCase() : '',
-                isVideo
+                isVideo: checkVideo()
             };
         });
         const blacklistName = mainPageInfo.blacklist;
@@ -289,10 +310,20 @@ async function extractAppData(url, browser, attempt = 1) {
                     const data = { appName: null, storeLink: null, isVideo: false };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                    const videoEl = document.querySelector('video');
-                    if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) {
-                        data.isVideo = true;
+                    // Iframe Video Check
+                    const checkFrameVideo = () => {
+                        const videoEl = root.querySelector('video');
+                        if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
+                        // Check for play buttons in iframe
+                        const playBtns = root.querySelectorAll('[aria-label*="Play" i], .material-icons, .goog-icon, button');
+                        for (const btn of playBtns) {
+                            if (btn.innerText.includes('play_arrow') || btn.innerText.includes('play_circle')) return true;
+                            const label = btn.getAttribute('aria-label') || '';
+                            if (label.toLowerCase().includes('play')) return true;
+                        }
+                        return false;
                     }
+                    if (checkFrameVideo()) data.isVideo = true;
 
                     // Helper to clean/extract real link from an href
                     const cleanLink = (href) => {
