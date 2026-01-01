@@ -276,77 +276,111 @@ async function extractAppData(url, browser, attempt = 1) {
                     const data = { appName: null, storeLink: null };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                    const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
-                    const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                    if (xpRes && xpRes.href) data.storeLink = xpRes.href;
+                    // Helper to clean/extract real link from an href
+                    const cleanLink = (href) => {
+                        if (!href || href.includes('javascript:')) return null;
 
-                    // App Link Selectors (Expanded for Text Ads)
-                    const linkSelectors = [
-                        'a[data-asoch-targets*="ochAppName"]',
-                        'a[data-asoch-targets*="ochInstallButton"]',
-                        'a[data-asoch-targets*="ctaButton"]',
-                        'a.ns-sbqu4-e-75',
-                        'a.install-button-anchor',
-                        'a[href*="googleadservices.com/pagead/aclk"]',
-                        'a[href*="play.google.com/store/apps/details"]',
-                        'a[href*="itunes.apple.com"]'
-                    ];
+                        // 1. Direct Store Links
+                        if (href.includes('play.google.com') || href.includes('itunes.apple.com')) {
+                            return href;
+                        }
 
+                        // 2. Google Ad Services Redirects (extract 'adurl')
+                        if (href.includes('googleadservices') || href.includes('/pagead/aclk')) {
+                            try {
+                                const m = href.match(/[\?&]adurl=([^&\s]+)/i);
+                                if (m && m[1]) {
+                                    const decoded = decodeURIComponent(m[1]);
+                                    if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
+                                        return decoded;
+                                    }
+                                    // Even if it's not strictly play/itunes, return the decoded target if it looks like a valid http url
+                                    if (decoded.startsWith('http')) return decoded;
+                                }
+                            } catch (e) { }
+                        }
+                        return null; // Return null if we can't find a meaningful store link
+                    };
+
+                    // STRATEGY 1: Combined Extraction (Best Logic based on User Feedback)
+                    // The App Name and Link are often in the SAME 'a' tag with 'ochAppName'
+                    const combinedSelector = 'a[data-asoch-targets*="ochAppName"]';
+                    const combinedEl = root.querySelector(combinedSelector);
+
+                    if (combinedEl) {
+                        const txt = combinedEl.innerText.trim();
+                        // Check if name is valid (not blacklisted)
+                        if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
+                            data.appName = txt;
+                            // Attempt to get link from THIS VERY SAME element
+                            const extractedLink = cleanLink(combinedEl.href);
+                            if (extractedLink) {
+                                data.storeLink = extractedLink;
+                            }
+                        }
+                    }
+
+                    // If we found both, we are GOLDEN. Return immediately.
+                    if (data.appName && data.storeLink) return data;
+
+
+                    // STRATEGY 2: Fallback - Separate Search
+                    // If Strategy 1 failed (or only found one part), try to fill gaps.
+
+                    // A. Find Link if missing
                     if (!data.storeLink) {
-                        for (const sel of linkSelectors) {
-                            const el = root.querySelector(sel);
-                            if (el && el.href && !el.href.includes('javascript:')) {
-                                const href = el.href;
-                                // Prefer direct Play / iTunes links
-                                if (href.includes('play.google.com') || href.includes('itunes.apple.com')) {
-                                    data.storeLink = href;
-                                    break;
-                                }
-                                // If it's a googleadservices redirect, try to extract adurl param that points to play/itunes
-                                if (href.includes('googleadservices')) {
-                                    try {
-                                        const m = href.match(/[\?&]adurl=([^&\s]+)/i);
-                                        if (m && m[1]) {
-                                            const decoded = decodeURIComponent(m[1]);
-                                            if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
-                                                data.storeLink = decoded;
-                                                break;
-                                            }
-                                        }
-                                    } catch (e) { }
-                                }
-                                // As a last resort, accept other honest-looking links (but prefer store links)
-                                if (!data.storeLink && (href.includes('play.google.com') || href.includes('itunes.apple.com') || href.includes('/store/apps/details'))) {
-                                    data.storeLink = href;
+                        const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
+                        const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                        if (xpRes && xpRes.href) data.storeLink = xpRes.href;
+
+                        if (!data.storeLink) {
+                            const linkSelectors = [
+                                'a[data-asoch-targets*="ochInstallButton"]', // High probability for link
+                                'a[data-asoch-targets*="ctaButton"]',
+                                'a.ns-sbqu4-e-75',
+                                'a.install-button-anchor',
+                                'a[href*="play.google.com/store/apps/details"]',
+                                'a[href*="itunes.apple.com"]'
+                            ];
+
+                            for (const sel of linkSelectors) {
+                                const el = root.querySelector(sel);
+                                const foundLink = el ? cleanLink(el.href) : null;
+                                if (foundLink) {
+                                    data.storeLink = foundLink;
                                     break;
                                 }
                             }
                         }
                     }
 
-                    // NAME EXTRACTION (With Blacklist)
-                    const nameSelectors = [
-                        'a[data-asoch-targets*="ochAppName"]',
-                        'a[data-asoch-targets*="AdTitle"]',
-                        '[role="heading"] span',
-                        '[role="link"] span',
-                        '.short-app-name a',
-                        'div[class*="app-name"]',
-                        'span[class*="app-name"]',
-                        '.app-title'
-                    ];
+                    // B. Find Name if missing
+                    if (!data.appName) {
+                        const nameSelectors = [
+                            'a[data-asoch-targets*="ochAppName"]',
+                            'a[data-asoch-targets*="AdTitle"]',
+                            '[role="heading"] span',
+                            '[role="link"] span',
+                            '.short-app-name a',
+                            'div[class*="app-name"]',
+                            'span[class*="app-name"]',
+                            '.app-title'
+                        ];
 
-                    for (const sel of nameSelectors) {
-                        const elements = root.querySelectorAll(sel);
-                        for (const el of elements) {
-                            const txt = el.innerText.trim();
-                            // ONLY accept if NOT the blacklisted advertiser name
-                            if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
-                                data.appName = txt;
-                                return data;
+                        for (const sel of nameSelectors) {
+                            const elements = root.querySelectorAll(sel);
+                            for (const el of elements) {
+                                const txt = el.innerText.trim();
+                                // ONLY accept if NOT the blacklisted advertiser name
+                                if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
+                                    data.appName = txt;
+                                    break; // Found a valid name
+                                }
                             }
+                            if (data.appName) break;
                         }
                     }
+
                     return data;
                 }, blacklistName);
 
