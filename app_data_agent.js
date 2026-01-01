@@ -390,34 +390,10 @@ async function extractAppData(url, browser, attempt = 1) {
                         }
                     }
 
-                    // B. Find Link (Separate Button/Link)
-                    if (!data.storeLink) {
-                        const linkSelectors = [
-                            'a[data-asoch-targets*="ochInstallButton"]',
-                            'a[data-asoch-targets*="ctaButton"]',
-                            '.install-button-anchor',
-                            'a.ns-sbqu4-e-75'
-                        ];
-
-                        for (const sel of linkSelectors) {
-                            const el = root.querySelector(sel);
-                            const foundLink = el ? cleanLink(el.href) : null;
-                            if (foundLink) {
-                                data.storeLink = foundLink;
-                                break;
-                            }
-                        }
-
-                        // Fallback Xpath if still not found
-                        if (!data.storeLink) {
-                            const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
-                            const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                            if (xpRes && xpRes.href) {
-                                const cleanXpLink = cleanLink(xpRes.href);
-                                if (cleanXpLink) data.storeLink = cleanXpLink;
-                            }
-                        }
-                    }
+                    // B. For Text Ads (Strategy 2), DO NOT search for links
+                    // User explicitly requested: "mention not found in test ads plstyore link"
+                    // Set storeLink to null explicitly for Text Ads
+                    data.storeLink = null;
 
                     return data;
                 }, blacklistName);
