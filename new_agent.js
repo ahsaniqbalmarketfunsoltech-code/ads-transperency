@@ -8,10 +8,32 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1beJ263B3m4L8pgD9RWsls-orKLUvLMfT2kExaiyNl7g';
 const SHEET_NAME = 'Sheet1';
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = 3;
+const CONCURRENT_PAGES = 1; // CRITICAL: Sequential only to avoid detection
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
 const RETRY_WAIT_MULTIPLIER = 1.5;
+
+// Anti-detection: Rotating User Agents
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+];
+
+// Anti-detection: Random viewport sizes
+const VIEWPORTS = [
+    { width: 1920, height: 1080 },
+    { width: 1366, height: 768 },
+    { width: 1536, height: 864 },
+    { width: 1440, height: 900 },
+    { width: 1280, height: 720 }
+];
+
+// Helper: Random delay between min and max milliseconds
+const randomDelay = (min, max) => new Promise(r => setTimeout(r, min + Math.random() * (max - min)));
 
 // ============================================
 // GOOGLE SHEETS SETUP
@@ -145,11 +167,27 @@ async function extractAppData(url, browser, attempt = 1) {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     let result = { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
 
-    // Set a realistic User-Agent to avoid early detection
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    // ANTI-DETECTION: Random User-Agent per request
+    const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+    await page.setUserAgent(userAgent);
+
+    // ANTI-DETECTION: Random viewport per request
+    const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
+    await page.setViewport(viewport);
+
+    // ANTI-DETECTION: Mask webdriver property
+    await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    });
 
     try {
-        console.log(`  🚀 Loading: ${url.substring(0, 60)}...`);
+        console.log(`  🚀 Loading (${viewport.width}x${viewport.height}): ${url.substring(0, 50)}...`);
+
+        // ANTI-DETECTION: Random delay before navigation (2-5 seconds)
+        await randomDelay(2000, 5000);
 
         // Reverting to networkidle0 for maximum safety - wait for all ad resources
         await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
@@ -169,17 +207,27 @@ async function extractAppData(url, browser, attempt = 1) {
             console.log('  🕒 Main container slow to appear, continuing...');
         }
 
-        // Base wait: Increase significantly for stability
-        const baseWait = 8000 * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
-        await sleep(baseWait);
+        // ANTI-DETECTION: Random wait with jitter (8-15 seconds)
+        const baseWait = 8000 + Math.random() * 7000;
+        const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
+        await sleep(baseWait * attemptMultiplier);
 
-        // Robust Scroll
+        // ANTI-DETECTION: Human-like scrolling with random movements
         await page.evaluate(async () => {
-            window.scrollBy(0, 800);
-            await new Promise(r => setTimeout(r, 500));
-            window.scrollBy(0, -800);
+            const randomScroll = 600 + Math.random() * 400; // 600-1000px
+            window.scrollBy(0, randomScroll);
+            await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+            window.scrollBy(0, -randomScroll / 2);
+            await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
         });
-        await sleep(1500);
+
+        // ANTI-DETECTION: Random mouse movement simulation
+        try {
+            await page.mouse.move(100 + Math.random() * 500, 100 + Math.random() * 300);
+            await sleep(300 + Math.random() * 500);
+        } catch (e) { }
+
+        await randomDelay(1500, 3000);
 
         const frames = page.frames();
         for (const frame of frames) {
@@ -271,7 +319,8 @@ async function extractWithRetry(url, browser) {
         const data = await extractAppData(url, browser, attempt);
         if (data.appName === 'BLOCKED') return data; // Return immediately to trigger restart
         if (data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND') return data;
-        await new Promise(r => setTimeout(r, 3000 + Math.random() * 2000));
+        // ANTI-DETECTION: Longer random wait between retries (5-10 seconds)
+        await randomDelay(5000, 10000);
     }
     return { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
 }
@@ -331,8 +380,10 @@ async function extractWithRetry(url, browser) {
         // Writing results safely to handle any row shifts
         await safeBatchWrite(sheets, results);
 
-        // Final batch delay to breathe
-        await new Promise(r => setTimeout(r, 2000));
+        // ANTI-DETECTION: Long random delay between batches (8-20 seconds)
+        const batchDelay = 8000 + Math.random() * 12000;
+        console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s before next request...`);
+        await new Promise(r => setTimeout(r, batchDelay));
     }
 
     await browser.close();
