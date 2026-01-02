@@ -101,49 +101,27 @@ async function getUrlData(sheets) {
 async function safeBatchWrite(sheets, updates) {
     if (updates.length === 0) return;
 
-    // 1. Re-fetch current Column A (URLs) and Column B (App Link) to find where these URLs are NOW
-    const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:C`,
-    });
-    const rows = response.data.values || [];
-
     const data = [];
-    updates.forEach(({ url, appName, storeLink, isVideo }) => {
-        // 2. Find the index where URL matches AND Column B (index 1) is empty
-        let foundIndex = -1;
-        for (let i = 1; i < rows.length; i++) {
-            if (rows[i][0]?.trim() === url && !rows[i][1]?.trim()) {
-                foundIndex = i;
-                break;
-            }
-        }
+    updates.forEach(({ url, rowIndex, appName, storeLink, isVideo }) => {
+        // Use the ORIGINAL rowIndex that was passed with the URL
+        // This ensures each URL's data goes back to its exact row
+        // rowIndex is 0-based from sheet array, so +1 for actual row number
+        const rowNum = rowIndex + 1;
 
-        // Fallback: If no empty row found, find the last match
-        if (foundIndex === -1) {
-            for (let i = rows.length - 1; i >= 1; i--) {
-                if (rows[i][0]?.trim() === url) {
-                    foundIndex = i;
-                    break;
-                }
-            }
-        }
+        console.log(`  📝 Writing data for row ${rowNum}: ${url.substring(0, 50)}...`);
 
-        if (foundIndex !== -1) {
-            const rowNum = foundIndex + 1;
-            data.push({
-                range: `${SHEET_NAME}!B${rowNum}`, // Column B for Link
-                values: [[storeLink]]
-            });
-            data.push({
-                range: `${SHEET_NAME}!C${rowNum}`, // Column C for Name
-                values: [[appName]]
-            });
-            data.push({
-                range: `${SHEET_NAME}!D${rowNum}`, // Column D for Format
-                values: [[isVideo ? 'Video Ad' : 'Text/Image Ad']]
-            });
-        }
+        data.push({
+            range: `${SHEET_NAME}!B${rowNum}`, // Column B for Link
+            values: [[storeLink]]
+        });
+        data.push({
+            range: `${SHEET_NAME}!C${rowNum}`, // Column C for Name
+            values: [[appName]]
+        });
+        data.push({
+            range: `${SHEET_NAME}!D${rowNum}`, // Column D for Format
+            values: [[isVideo ? 'Video Ad' : 'Text/Image Ad']]
+        });
     });
 
     if (data.length === 0) return;
@@ -151,7 +129,7 @@ async function safeBatchWrite(sheets, updates) {
         spreadsheetId: SPREADSHEET_ID,
         resource: { valueInputOption: 'RAW', data: data }
     });
-    console.log(`  ✅ Safely wrote ${data.length / 2} results to 'App data'`);
+    console.log(`  ✅ Wrote ${updates.length} results to 'App data'`);
 }
 
 // ============================================
@@ -551,7 +529,8 @@ async function extractWithRetry(url, browser) {
             try {
                 const results = await Promise.all(batch.map(async (item) => {
                     const data = await extractWithRetry(item.url, browser);
-                    return { url: item.url, ...data };
+                    // KEEP the original rowIndex so data writes to the EXACT same row
+                    return { url: item.url, rowIndex: item.rowIndex, ...data };
                 }));
 
                 // Debug: show extracted results before writing
