@@ -1,13 +1,13 @@
 name: New Agent Workflow
 
 on:
-  schedule:
+#  schedule:
     # Runs 4 times per day (every 6 hours) for 24/7 coverage
     # Pakistan Time is UTC+5
-    - cron: '0 0 * * *'  # 5:00 AM PKT
-    - cron: '0 6 * * *'  # 11:00 AM PKT
-    - cron: '0 12 * * *' # 5:00 PM PKT
-    - cron: '0 18 * * *' # 11:00 PM PKT
+   # - cron: '0 0 * * *'  # 5:00 AM PKT
+   # - cron: '0 6 * * *'  # 11:00 AM PKT
+    #- cron: '0 12 * * *' # 5:00 PM PKT
+   # - cron: '0 18 * * *' # 11:00 PM PKT
   workflow_dispatch: # Allows manual triggering
   repository_dispatch:
     types: [new_agent_trigger]
