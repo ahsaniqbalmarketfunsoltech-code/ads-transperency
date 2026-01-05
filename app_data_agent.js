@@ -281,12 +281,99 @@ async function extractAppData(url, browser, attempt = 1) {
 
         await randomDelay(500, 1000);
 
+        // =====================================================
+        // CRITICAL FIX: Find the VISIBLE ad variation first
+        // On Google Ads Transparency, multiple ad variations load
+        // in different iframes, but only ONE is visible at a time.
+        // We need to identify and extract from ONLY the visible one.
+        // =====================================================
+
+        // Step 1: Find the visible ad container on the MAIN page
+        const visibleAdInfo = await page.evaluate(() => {
+            // Look for the carousel/slider that shows ads
+            // The visible ad is typically in a slide that is currently displayed
+            const carouselSelectors = [
+                '[class*="carousel"] [class*="active"]',
+                '[class*="slider"] [class*="active"]',
+                '[class*="slide"]:not([class*="hidden"])',
+                '[aria-hidden="false"]',
+                '.ad-preview-container:not([hidden])',
+                '[class*="creative-preview"]:not([style*="display: none"])',
+                '[class*="ad-container"]:not([style*="display: none"])'
+            ];
+
+            let visibleContainer = null;
+            for (const sel of carouselSelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetWidth > 0 && el.offsetHeight > 0) {
+                    visibleContainer = sel;
+                    break;
+                }
+            }
+
+            // Get all iframes and check which ones are VISIBLE (have dimensions)
+            const iframes = document.querySelectorAll('iframe');
+            const visibleFrameUrls = [];
+
+            iframes.forEach(iframe => {
+                // Check if iframe is visible
+                const rect = iframe.getBoundingClientRect();
+                const style = window.getComputedStyle(iframe);
+                const isVisible = rect.width > 50 && rect.height > 50 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    parseFloat(style.opacity) > 0;
+
+                // Check if any parent is hidden
+                let parent = iframe.parentElement;
+                let parentVisible = true;
+                while (parent) {
+                    const parentStyle = window.getComputedStyle(parent);
+                    if (parentStyle.display === 'none' ||
+                        parentStyle.visibility === 'hidden' ||
+                        parseFloat(parentStyle.opacity) === 0) {
+                        parentVisible = false;
+                        break;
+                    }
+                    parent = parent.parentElement;
+                }
+
+                if (isVisible && parentVisible) {
+                    visibleFrameUrls.push(iframe.src || iframe.name || 'unnamed');
+                }
+            });
+
+            return {
+                containerSelector: visibleContainer,
+                visibleFrameUrls: visibleFrameUrls,
+                totalFrames: iframes.length
+            };
+        });
+
+        console.log(`  📊 Found ${visibleAdInfo.totalFrames} iframes, ${visibleAdInfo.visibleFrameUrls.length} visible`);
+
+        // Step 2: Extract from frames, but prioritize VISIBLE ones
         const frames = page.frames();
+        let foundFromVisibleFrame = false;
+
         for (const frame of frames) {
             try {
+                // Check if this frame's URL matches a visible iframe
+                const frameUrl = frame.url() || '';
+                const isLikelyVisible = visibleAdInfo.visibleFrameUrls.some(vfUrl =>
+                    frameUrl.includes(vfUrl) || vfUrl.includes(frameUrl) ||
+                    frameUrl.includes('tpc.googlesyndication') // Common ad frame URL
+                );
+
                 const frameData = await frame.evaluate((blacklist) => {
                     const data = { appName: null, storeLink: null, isVideo: false };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
+
+                    // Check if this frame content is visible (has dimensions)
+                    const bodyRect = document.body.getBoundingClientRect();
+                    if (bodyRect.width < 50 || bodyRect.height < 50) {
+                        return { ...data, isHidden: true };
+                    }
 
                     // =====================================================
                     // ULTRA-PRECISE STORE LINK EXTRACTOR
@@ -296,25 +383,17 @@ async function extractAppData(url, browser, attempt = 1) {
                         if (!href || typeof href !== 'string') return null;
                         if (href.includes('javascript:') || href === '#') return null;
 
-                        // Helper to validate it's a REAL store link
                         const isValidStoreLink = (url) => {
                             if (!url) return false;
-                            // Must contain play.google.com/store or apps.apple.com or itunes.apple.com
-                            // AND must have an app ID pattern
                             const isPlayStore = url.includes('play.google.com/store/apps') && url.includes('id=');
                             const isAppStore = (url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/');
                             return isPlayStore || isAppStore;
                         };
 
-                        // 1. Check if it's a DIRECT store link
-                        if (isValidStoreLink(href)) {
-                            return href;
-                        }
+                        if (isValidStoreLink(href)) return href;
 
-                        // 2. Decode Google Ad Services redirect
                         if (href.includes('googleadservices.com') || href.includes('/pagead/aclk')) {
                             try {
-                                // Try multiple URL parameter patterns Google uses
                                 const patterns = [
                                     /[?&]adurl=([^&\s]+)/i,
                                     /[?&]dest=([^&\s]+)/i,
@@ -324,76 +403,51 @@ async function extractAppData(url, browser, attempt = 1) {
                                     const match = href.match(pattern);
                                     if (match && match[1]) {
                                         const decoded = decodeURIComponent(match[1]);
-                                        if (isValidStoreLink(decoded)) {
-                                            return decoded;
-                                        }
+                                        if (isValidStoreLink(decoded)) return decoded;
                                     }
                                 }
                             } catch (e) { }
                         }
 
-                        // 3. Last resort: look for embedded store URL anywhere in the href
                         try {
-                            // Play Store pattern
                             const playMatch = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
                             if (playMatch && playMatch[1]) return playMatch[1];
-
-                            // App Store pattern
                             const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
                             if (appMatch && appMatch[1]) return appMatch[1];
                         } catch (e) { }
 
-                        return null; // STRICT: No valid store link found
+                        return null;
                     };
 
                     // =====================================================
-                    // CLEAN APP NAME (Remove CSS garbage, duplicates)
+                    // CLEAN APP NAME
                     // =====================================================
                     const cleanAppName = (text) => {
                         if (!text || typeof text !== 'string') return null;
                         let clean = text.trim();
-
-                        // Remove invisible Unicode chars
                         clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
-
-                        // Remove CSS class patterns (.class-name)
                         clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' ');
-
-                        // Remove CSS style patterns (property: value;)
                         clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;/g, ' ');
-
-                        // Remove Google separator
                         clean = clean.split('!@~!@~')[0];
-
-                        // Handle duplicates like "AppName | AppName"
                         if (clean.includes('|')) {
                             const parts = clean.split('|').map(p => p.trim()).filter(p => p.length > 2);
                             if (parts.length > 0) clean = parts[0];
                         }
-
-                        // Final cleanup
                         clean = clean.replace(/\s+/g, ' ').trim();
-
-                        // Reject if too short or just numbers/symbols
                         if (clean.length < 2) return null;
                         if (/^[\d\s\W]+$/.test(clean)) return null;
-
                         return clean;
                     };
 
                     // =====================================================
-                    // PRECISE EXTRACTION STRATEGY
-                    // Priority: Find anchor with BOTH app name text AND valid store link
+                    // EXTRACTION - Find FIRST element with BOTH name + store link
                     // =====================================================
-
-                    // PRIORITY 1: The exact element from screenshot - anchor with data-asoch-targets containing app name
                     const appNameSelectors = [
-                        'a[data-asoch-targets*="appname" i]',      // Case insensitive appname
-                        'a[data-asoch-targets*="AppName" i]',      // ochAppName variations
-                        'a[data-asoch-targets*="app-name" i]',     // Hyphenated
-                        'a[data-asoch-targets*="rrappname" i]',    // From screenshot: adl.m/rrappname
-                        'a[class*="short-app-name"]',              // Class-based
-                        '.short-app-name a'                        // Child anchor of short-app-name
+                        'a[data-asoch-targets*="ochAppName"]',
+                        'a[data-asoch-targets*="appname" i]',
+                        'a[data-asoch-targets*="rrappname" i]',
+                        'a[class*="short-app-name"]',
+                        '.short-app-name a'
                     ];
 
                     for (const selector of appNameSelectors) {
@@ -401,43 +455,26 @@ async function extractAppData(url, browser, attempt = 1) {
                         for (const el of elements) {
                             const rawName = el.innerText || el.textContent || '';
                             const appName = cleanAppName(rawName);
-
-                            // Skip if name is invalid or matches blacklist (advertiser name)
                             if (!appName || appName.toLowerCase() === blacklist) continue;
 
-                            // Try to extract store link from this SAME element
                             const storeLink = extractStoreLink(el.href);
-
                             if (appName && storeLink) {
-                                // FOUND BOTH - This is a Video Ad with valid data
-                                return {
-                                    appName: appName,
-                                    storeLink: storeLink,
-                                    isVideo: true
-                                };
-                            } else if (appName && !storeLink) {
-                                // Has name but no valid store link in this element
-                                // Store the name and continue looking (might find better match)
-                                if (!data.appName) {
-                                    data.appName = appName;
-                                }
+                                return { appName, storeLink, isVideo: true, isHidden: false };
+                            } else if (appName && !data.appName) {
+                                data.appName = appName;
                             }
                         }
                     }
 
-                    // PRIORITY 2: Look for Install button with store link (backup for link only)
+                    // Backup: Install button for link
                     if (data.appName && !data.storeLink) {
-                        const installSelectors = [
+                        const installSels = [
+                            'a[data-asoch-targets*="ochButton"]',
                             'a[data-asoch-targets*="Install" i]',
-                            'a[data-asoch-targets*="install" i]',
-                            'a[aria-label*="Install" i]',
-                            'button[data-asoch-targets*="Install" i]',
-                            '.install-button a',
-                            'a[class*="install"]'
+                            'a[aria-label*="Install" i]'
                         ];
-
-                        for (const selector of installSelectors) {
-                            const el = root.querySelector(selector);
+                        for (const sel of installSels) {
+                            const el = root.querySelector(sel);
                             if (el && el.href) {
                                 const storeLink = extractStoreLink(el.href);
                                 if (storeLink) {
@@ -449,17 +486,11 @@ async function extractAppData(url, browser, attempt = 1) {
                         }
                     }
 
-                    // PRIORITY 3: Fallback for app name only (Text/Image ads)
+                    // Fallback for app name only
                     if (!data.appName) {
-                        const textNameSelectors = [
-                            '[role="heading"]',
-                            'div[class*="app-name"]',
-                            'span[class*="app-name"]',
-                            '.app-title'
-                        ];
-
-                        for (const selector of textNameSelectors) {
-                            const elements = root.querySelectorAll(selector);
+                        const textSels = ['[role="heading"]', 'div[class*="app-name"]', '.app-title'];
+                        for (const sel of textSels) {
+                            const elements = root.querySelectorAll(sel);
                             for (const el of elements) {
                                 const rawName = el.innerText || el.textContent || '';
                                 const appName = cleanAppName(rawName);
@@ -472,26 +503,28 @@ async function extractAppData(url, browser, attempt = 1) {
                         }
                     }
 
-                    // STRICT RULE: If we have a name but no store link was found
-                    // in the EXACT app name element, DO NOT search elsewhere
-                    // This prevents picking up wrong/dummy links from other parts of the page
-
+                    data.isHidden = false;
                     return data;
                 }, blacklistName);
 
-                if (frameData.appName && result.appName === 'NOT_FOUND') {
+                // Skip hidden frames
+                if (frameData.isHidden) continue;
+
+                // If we found BOTH app name AND store link, use this immediately (high confidence)
+                if (frameData.appName && frameData.storeLink && result.appName === 'NOT_FOUND') {
+                    result.appName = cleanName(frameData.appName);
+                    result.storeLink = frameData.storeLink;
+                    result.isVideo = frameData.isVideo;
+                    foundFromVisibleFrame = true;
+                    console.log(`  ✓ Found: ${result.appName} -> ${result.storeLink.substring(0, 60)}...`);
+                    break; // We have both, stop searching
+                }
+
+                // If we only found name (no link), store it but keep looking
+                if (frameData.appName && !frameData.storeLink && result.appName === 'NOT_FOUND') {
                     result.appName = cleanName(frameData.appName);
                     result.isVideo = frameData.isVideo;
-
-                    // For Video Ads, assign the store link
-                    // For Text Ads (storeLink is null from frame), keep it as NOT_FOUND
-                    if (frameData.storeLink) {
-                        result.storeLink = frameData.storeLink;
-                    }
-
-                    // BREAK the loop once we found the app data
-                    // This prevents Text Ads from picking up wrong links from other frames
-                    break;
+                    // DON'T break - continue looking for a frame with BOTH name+link
                 }
             } catch (e) { }
         }
