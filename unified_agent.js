@@ -1,10 +1,10 @@
 /**
  * UNIFIED GOOGLE ADS TRANSPARENCY AGENT
  * =====================================
- * Combines app data extraction + video ID extraction in ONE visit.
+ * Combines app data extraction (from app_data_agent.js) + video ID extraction (from agent.js)
  * 
  * Sheet Structure:
- *   Column A: Advertiser Name (manual input or extracted)
+ *   Column A: Advertiser Name (manual input)
  *   Column B: Ads URL (the Google Ads Transparency link to scrape)
  *   Column C: App Link (Play Store / App Store link)
  *   Column D: App Name
@@ -16,6 +16,7 @@
  *   3. If C is "NOT_FOUND" → Skip video extraction (it's a text ad)
  */
 
+// Use puppeteer-extra + stealth plugin (same as app_data_agent.js)
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
@@ -26,17 +27,17 @@ const fs = require('fs');
 // CONFIGURATION
 // ============================================
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
-const SHEET_NAME = 'Sheet1'; // Your new unified sheet
+const SHEET_NAME = 'Sheet1';
 const CREDENTIALS_PATH = './credentials.json';
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 2;
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
-const VIDEO_WAIT_TIME = 12000; // Time to wait for video to load after clicking play
+const VIDEO_WAIT_TIME = 12000;
 const RETRY_WAIT_MULTIPLIER = 1.5;
 
-// Batch delay range (in ms)
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000;
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 12000;
+// Batch delay range (from app_data_agent.js)
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 8000;
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 20000;
 
 // Proxy rotation settings (from app_data_agent.js)
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
@@ -51,7 +52,7 @@ function pickProxy() {
 
 const proxyStats = { totalBlocks: 0, perProxy: {} };
 
-// Anti-detection: Rotating User Agents
+// Anti-detection: Rotating User Agents (from app_data_agent.js)
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -61,7 +62,7 @@ const USER_AGENTS = [
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 ];
 
-// Anti-detection: Random viewport sizes
+// Anti-detection: Random viewport sizes (from app_data_agent.js)
 const VIEWPORTS = [
     { width: 1920, height: 1080 },
     { width: 1366, height: 768 },
@@ -73,6 +74,19 @@ const VIEWPORTS = [
 // Helper functions
 const randomDelay = (min, max) => new Promise(r => setTimeout(r, min + Math.random() * (max - min)));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Clean app name function (EXACT copy from app_data_agent.js)
+const cleanName = (name) => {
+    if (!name) return 'NOT_FOUND';
+    let cleaned = name.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '').trim();
+    cleaned = cleaned.split('!@~!@~')[0].trim();
+    if (cleaned.includes('|')) {
+        const parts = cleaned.split('|').map(p => p.trim()).filter(p => p.length > 0);
+        const uniqueParts = [...new Set(parts)];
+        cleaned = uniqueParts[0];
+    }
+    return cleaned;
+};
 
 // ============================================
 // GOOGLE SHEETS SETUP
@@ -90,30 +104,27 @@ async function getGoogleSheetsClient() {
 async function getUrlData(sheets) {
     const response = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:E`, // A=Advertiser, B=URL, C=App Link, D=App Name, E=Video ID
+        range: `${SHEET_NAME}!A:E`,
     });
     const rows = response.data.values || [];
     const toProcess = [];
 
-    // Skip header row (index 0)
     for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
-        const advertiserName = row[0]?.trim() || ''; // Column A - Advertiser Name
-        const url = row[1]?.trim() || '';             // Column B - Ads URL
-        const storeLink = row[2]?.trim() || '';       // Column C - App Link
-        const appName = row[3]?.trim() || '';         // Column D - App Name
-        const videoId = row[4]?.trim() || '';         // Column E - Video ID
+        const advertiserName = row[0]?.trim() || '';
+        const url = row[1]?.trim() || '';
+        const storeLink = row[2]?.trim() || '';
+        const appName = row[3]?.trim() || '';
+        const videoId = row[4]?.trim() || '';
 
-        if (!url) continue; // Skip rows without URL in Column B
+        if (!url) continue;
 
-        // Determine what needs to be extracted
         const needsMetadata = !storeLink || !appName;
         const hasValidStoreLink = storeLink &&
             storeLink !== 'NOT_FOUND' &&
             (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
         const needsVideoId = hasValidStoreLink && !videoId;
 
-        // Only add to processing queue if something needs to be done
         if (needsMetadata || needsVideoId) {
             toProcess.push({
                 url,
@@ -135,23 +146,20 @@ async function batchWriteToSheet(sheets, updates) {
 
     const data = [];
     updates.forEach(({ rowIndex, storeLink, appName, videoId }) => {
-        const rowNum = rowIndex + 1; // 1-indexed for Sheets
+        const rowNum = rowIndex + 1;
 
-        // Column C = App Link
         if (storeLink && storeLink !== 'SKIP') {
             data.push({
                 range: `${SHEET_NAME}!C${rowNum}`,
                 values: [[storeLink]]
             });
         }
-        // Column D = App Name
         if (appName && appName !== 'SKIP') {
             data.push({
                 range: `${SHEET_NAME}!D${rowNum}`,
                 values: [[appName]]
             });
         }
-        // Column E = Video ID
         if (videoId && videoId !== 'SKIP') {
             data.push({
                 range: `${SHEET_NAME}!E${rowNum}`,
@@ -203,7 +211,372 @@ async function triggerSelfRestart() {
 }
 
 // ============================================
-// UNIFIED EXTRACTION LOGIC
+// METADATA EXTRACTION (EXACT COPY from app_data_agent.js extractAppData)
+// ============================================
+async function extractMetadata(url, page) {
+    let result = { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND', isVideo: false };
+
+    try {
+        // Get blacklist name (advertiser name)
+        const mainPageInfo = await page.evaluate(() => {
+            const topTitle = document.querySelector('h1, .advertiser-name, .ad-details-heading');
+
+            const checkVideo = () => {
+                const videoEl = document.querySelector('video');
+                if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
+                const formatText = document.body.innerText;
+                if (formatText.includes('Format: Video')) {
+                    const playBtn = document.querySelector('[aria-label*="Play" i], .material-icons, .goog-icon');
+                    if (playBtn) {
+                        if (playBtn.innerText.includes('play_arrow') || playBtn.innerText.includes('play_circle')) return true;
+                        const label = playBtn.getAttribute('aria-label') || '';
+                        if (label.toLowerCase().includes('play')) return true;
+                    }
+                }
+                return false;
+            };
+
+            return {
+                blacklist: topTitle ? topTitle.innerText.trim().toLowerCase() : '',
+                isVideo: checkVideo()
+            };
+        });
+        const blacklistName = mainPageInfo.blacklist;
+        if (mainPageInfo.isVideo) result.isVideo = true;
+
+        // Find visible iframes (EXACT from app_data_agent.js)
+        const visibleAdInfo = await page.evaluate(() => {
+            const carouselSelectors = [
+                '[class*="carousel"] [class*="active"]',
+                '[class*="slider"] [class*="active"]',
+                '[class*="slide"]:not([class*="hidden"])',
+                '[aria-hidden="false"]',
+                '.ad-preview-container:not([hidden])',
+                '[class*="creative-preview"]:not([style*="display: none"])',
+                '[class*="ad-container"]:not([style*="display: none"])'
+            ];
+
+            let visibleContainer = null;
+            for (const sel of carouselSelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetWidth > 0 && el.offsetHeight > 0) {
+                    visibleContainer = sel;
+                    break;
+                }
+            }
+
+            const iframes = document.querySelectorAll('iframe');
+            const visibleFrameUrls = [];
+
+            iframes.forEach(iframe => {
+                const rect = iframe.getBoundingClientRect();
+                const style = window.getComputedStyle(iframe);
+                const isVisible = rect.width > 50 && rect.height > 50 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    parseFloat(style.opacity) > 0;
+
+                let parent = iframe.parentElement;
+                let parentVisible = true;
+                while (parent) {
+                    const parentStyle = window.getComputedStyle(parent);
+                    if (parentStyle.display === 'none' ||
+                        parentStyle.visibility === 'hidden' ||
+                        parseFloat(parentStyle.opacity) === 0) {
+                        parentVisible = false;
+                        break;
+                    }
+                    parent = parent.parentElement;
+                }
+
+                if (isVisible && parentVisible) {
+                    visibleFrameUrls.push(iframe.src || iframe.name || 'unnamed');
+                }
+            });
+
+            return {
+                containerSelector: visibleContainer,
+                visibleFrameUrls: visibleFrameUrls,
+                totalFrames: iframes.length
+            };
+        });
+
+        console.log(`  📊 Found ${visibleAdInfo.totalFrames} iframes, ${visibleAdInfo.visibleFrameUrls.length} visible`);
+
+        // Extract from frames (EXACT from app_data_agent.js)
+        const frames = page.frames();
+
+        for (const frame of frames) {
+            try {
+                const frameData = await frame.evaluate((blacklist) => {
+                    const data = { appName: null, storeLink: null, isVideo: false };
+                    const root = document.querySelector('#portrait-landscape-phone') || document.body;
+
+                    const bodyRect = document.body.getBoundingClientRect();
+                    if (bodyRect.width < 50 || bodyRect.height < 50) {
+                        return { ...data, isHidden: true };
+                    }
+
+                    // EXACT extractStoreLink from app_data_agent.js
+                    const extractStoreLink = (href) => {
+                        if (!href || typeof href !== 'string') return null;
+                        if (href.includes('javascript:') || href === '#') return null;
+
+                        const isValidStoreLink = (url) => {
+                            if (!url) return false;
+                            const isPlayStore = url.includes('play.google.com/store/apps') && url.includes('id=');
+                            const isAppStore = (url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/');
+                            return isPlayStore || isAppStore;
+                        };
+
+                        if (isValidStoreLink(href)) return href;
+
+                        if (href.includes('googleadservices.com') || href.includes('/pagead/aclk')) {
+                            try {
+                                const patterns = [
+                                    /[?&]adurl=([^&\s]+)/i,
+                                    /[?&]dest=([^&\s]+)/i,
+                                    /[?&]url=([^&\s]+)/i
+                                ];
+                                for (const pattern of patterns) {
+                                    const match = href.match(pattern);
+                                    if (match && match[1]) {
+                                        const decoded = decodeURIComponent(match[1]);
+                                        if (isValidStoreLink(decoded)) return decoded;
+                                    }
+                                }
+                            } catch (e) { }
+                        }
+
+                        try {
+                            const playMatch = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                            if (playMatch && playMatch[1]) return playMatch[1];
+                            const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
+                            if (appMatch && appMatch[1]) return appMatch[1];
+                        } catch (e) { }
+
+                        return null;
+                    };
+
+                    // EXACT cleanAppName from app_data_agent.js
+                    const cleanAppName = (text) => {
+                        if (!text || typeof text !== 'string') return null;
+                        let clean = text.trim();
+                        clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
+                        clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' ');
+                        clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;/g, ' ');
+                        clean = clean.split('!@~!@~')[0];
+                        if (clean.includes('|')) {
+                            const parts = clean.split('|').map(p => p.trim()).filter(p => p.length > 2);
+                            if (parts.length > 0) clean = parts[0];
+                        }
+                        clean = clean.replace(/\s+/g, ' ').trim();
+                        if (clean.length < 2) return null;
+                        if (/^[\d\s\W]+$/.test(clean)) return null;
+                        return clean;
+                    };
+
+                    // EXACT selectors from app_data_agent.js
+                    const appNameSelectors = [
+                        'a[data-asoch-targets*="ochAppName"]',
+                        'a[data-asoch-targets*="appname" i]',
+                        'a[data-asoch-targets*="rrappname" i]',
+                        'a[class*="short-app-name"]',
+                        '.short-app-name a'
+                    ];
+
+                    for (const selector of appNameSelectors) {
+                        const elements = root.querySelectorAll(selector);
+                        for (const el of elements) {
+                            const rawName = el.innerText || el.textContent || '';
+                            const appName = cleanAppName(rawName);
+                            if (!appName || appName.toLowerCase() === blacklist) continue;
+
+                            const storeLink = extractStoreLink(el.href);
+                            if (appName && storeLink) {
+                                return { appName, storeLink, isVideo: true, isHidden: false };
+                            } else if (appName && !data.appName) {
+                                data.appName = appName;
+                            }
+                        }
+                    }
+
+                    // Backup: Install button for link (EXACT from app_data_agent.js)
+                    if (data.appName && !data.storeLink) {
+                        const installSels = [
+                            'a[data-asoch-targets*="ochButton"]',
+                            'a[data-asoch-targets*="Install" i]',
+                            'a[aria-label*="Install" i]'
+                        ];
+                        for (const sel of installSels) {
+                            const el = root.querySelector(sel);
+                            if (el && el.href) {
+                                const storeLink = extractStoreLink(el.href);
+                                if (storeLink) {
+                                    data.storeLink = storeLink;
+                                    data.isVideo = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback for app name only (EXACT from app_data_agent.js)
+                    if (!data.appName) {
+                        const textSels = ['[role="heading"]', 'div[class*="app-name"]', '.app-title'];
+                        for (const sel of textSels) {
+                            const elements = root.querySelectorAll(sel);
+                            for (const el of elements) {
+                                const rawName = el.innerText || el.textContent || '';
+                                const appName = cleanAppName(rawName);
+                                if (appName && appName.toLowerCase() !== blacklist) {
+                                    data.appName = appName;
+                                    break;
+                                }
+                            }
+                            if (data.appName) break;
+                        }
+                    }
+
+                    data.isHidden = false;
+                    return data;
+                }, blacklistName);
+
+                if (frameData.isHidden) continue;
+
+                if (frameData.appName && frameData.storeLink && result.appName === 'NOT_FOUND') {
+                    result.appName = cleanName(frameData.appName);
+                    result.storeLink = frameData.storeLink;
+                    result.isVideo = frameData.isVideo;
+                    console.log(`  ✓ Found: ${result.appName} -> ${result.storeLink.substring(0, 60)}...`);
+                    break;
+                }
+
+                if (frameData.appName && !frameData.storeLink && result.appName === 'NOT_FOUND') {
+                    result.appName = cleanName(frameData.appName);
+                    result.isVideo = frameData.isVideo;
+                }
+            } catch (e) { }
+        }
+
+        // Direct store link cleanup (EXACT from app_data_agent.js)
+        if (result.storeLink !== 'NOT_FOUND' && result.storeLink.includes('adurl=')) {
+            try {
+                const urlObj = new URL(result.storeLink);
+                const adUrl = urlObj.searchParams.get('adurl');
+                if (adUrl && adUrl.startsWith('http')) result.storeLink = adUrl;
+            } catch (e) { }
+        }
+
+        // Meta tags fallback (EXACT from app_data_agent.js)
+        if (result.appName === 'NOT_FOUND') {
+            try {
+                const pageSource = await page.content();
+                const metaOg = pageSource.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
+                if (metaOg && metaOg[1]) result.appName = metaOg[1].trim();
+                if (result.appName === 'NOT_FOUND') {
+                    const metaTitle = pageSource.match(/<meta[^>]+name=["']title["'][^>]+content=["']([^"']+)["']/i);
+                    if (metaTitle && metaTitle[1]) result.appName = metaTitle[1].trim();
+                }
+                if (result.appName === 'NOT_FOUND') {
+                    const titleTag = pageSource.match(/<title>([^<]+)<\/title>/i);
+                    if (titleTag && titleTag[1]) {
+                        result.appName = titleTag[1].split('|')[0].split('-')[0].trim();
+                    }
+                }
+            } catch (e) { }
+        }
+
+        return result;
+    } catch (err) {
+        console.error(`  ❌ Metadata error: ${err.message}`);
+        return { appName: 'ERROR', storeLink: 'ERROR', isVideo: false };
+    }
+}
+
+// ============================================
+// VIDEO ID EXTRACTION (EXACT COPY from agent.js)
+// ============================================
+async function extractVideoId(page, capturedVideoId) {
+    // Find and click play button (EXACT from agent.js)
+    const playButtonInfo = await page.evaluate(() => {
+        const results = { found: false, x: 0, y: 0 };
+        const searchForPlayButton = (root) => {
+            const playButton = root.querySelector('.play-button');
+            if (playButton) {
+                const rect = playButton.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    results.found = true;
+                    results.x = rect.left + rect.width / 2;
+                    results.y = rect.top + rect.height / 2;
+                    return true;
+                }
+            }
+            const elements = root.querySelectorAll('*');
+            for (const el of elements) {
+                if (el.shadowRoot) {
+                    const found = searchForPlayButton(el.shadowRoot);
+                    if (found) return true;
+                }
+            }
+            return false;
+        };
+
+        const iframes = document.querySelectorAll('iframe');
+        for (let i = 0; i < iframes.length; i++) {
+            try {
+                const iframeDoc = iframes[i].contentDocument || iframes[i].contentWindow?.document;
+                if (iframeDoc) {
+                    const found = searchForPlayButton(iframeDoc);
+                    if (found) break;
+                }
+            } catch (e) { }
+        }
+        if (!results.found) searchForPlayButton(document);
+
+        if (!results.found) {
+            for (const iframe of iframes) {
+                const rect = iframe.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    results.found = true;
+                    results.x = rect.left + rect.width / 2;
+                    results.y = rect.top + rect.height / 2;
+                    break;
+                }
+            }
+        }
+        return results;
+    });
+
+    if (playButtonInfo.found) {
+        try {
+            const client = await page.target().createCDPSession();
+            await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: playButtonInfo.x, y: playButtonInfo.y });
+            await sleep(100);
+            await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
+            await sleep(80);
+            await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
+
+            await sleep(VIDEO_WAIT_TIME);
+
+            if (capturedVideoId) {
+                console.log(`  ✓ Video ID: ${capturedVideoId}`);
+                return capturedVideoId;
+            } else {
+                console.log(`  ⚠️ No video ID captured`);
+                return 'NOT_FOUND';
+            }
+        } catch (e) {
+            console.log(`  ⚠️ Click failed: ${e.message}`);
+            return 'NOT_FOUND';
+        }
+    } else {
+        return 'NOT_FOUND';
+    }
+}
+
+// ============================================
+// UNIFIED EXTRACTION (ONE VISIT PER URL)
 // ============================================
 async function extractAllData(url, browser, needsMetadata, needsVideoId, existingStoreLink) {
     const page = await browser.newPage();
@@ -214,13 +587,15 @@ async function extractAllData(url, browser, needsMetadata, needsVideoId, existin
     };
     let capturedVideoId = null;
 
-    // ANTI-DETECTION: Random User-Agent and viewport
+    // ANTI-DETECTION: Random User-Agent per request (from app_data_agent.js)
     const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-    const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
     await page.setUserAgent(userAgent);
+
+    // ANTI-DETECTION: Random viewport (from app_data_agent.js)
+    const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
     await page.setViewport(viewport);
 
-    // ANTI-DETECTION: Mask webdriver property
+    // ANTI-DETECTION: Mask webdriver (from app_data_agent.js)
     await page.evaluateOnNewDocument(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         window.chrome = { runtime: {} };
@@ -228,7 +603,7 @@ async function extractAllData(url, browser, needsMetadata, needsVideoId, existin
         Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
     });
 
-    // Network listener for Video ID (from agent.js)
+    // Set up request interception for video ID (from agent.js)
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const reqUrl = request.url();
@@ -239,7 +614,6 @@ async function extractAllData(url, browser, needsMetadata, needsVideoId, existin
                 capturedVideoId = id;
             }
         }
-        // Block heavy resources to speed up loading
         const resourceType = request.resourceType();
         if (['image', 'font'].includes(resourceType)) {
             request.abort();
@@ -250,12 +624,13 @@ async function extractAllData(url, browser, needsMetadata, needsVideoId, existin
 
     try {
         console.log(`  🚀 Loading (${viewport.width}x${viewport.height}): ${url.substring(0, 60)}...`);
+
         await randomDelay(1000, 2000);
         await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
 
         const response = await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
-        // Block detection
+        // Block detection (from app_data_agent.js)
         const content = await page.content();
         if ((response && response.status && response.status() === 429) ||
             content.includes('Our systems have detected unusual traffic') ||
@@ -263,339 +638,49 @@ async function extractAllData(url, browser, needsMetadata, needsVideoId, existin
             content.toLowerCase().includes('captcha') ||
             content.toLowerCase().includes('g-recaptcha') ||
             content.toLowerCase().includes('verify you are human')) {
-            console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic or captcha.');
+            console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic.');
             await page.close();
             return { storeLink: 'BLOCKED', appName: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        await randomDelay(2000, 4000);
+        // Wait with jitter (from app_data_agent.js)
+        const baseWait = 3000 + Math.random() * 2000;
+        await sleep(baseWait);
 
-        // Human-like scrolling
+        // Human-like scrolling (from app_data_agent.js)
         await page.evaluate(async () => {
             const randomScroll = 600 + Math.random() * 400;
             window.scrollBy(0, randomScroll);
             await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
             window.scrollBy(0, -randomScroll / 2);
+            await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
         });
 
-        // =====================================================
-        // PHASE 1: METADATA EXTRACTION (App Link + App Name)
-        // =====================================================
+        // Random mouse movement (from app_data_agent.js)
+        try {
+            await page.mouse.move(100 + Math.random() * 500, 100 + Math.random() * 300);
+            await sleep(300 + Math.random() * 500);
+        } catch (e) { }
+
+        await randomDelay(500, 1000);
+
+        // PHASE 1: METADATA EXTRACTION
         if (needsMetadata) {
             console.log(`  📊 Extracting metadata...`);
-
-            // Get blacklist name (advertiser name) to avoid confusion
-            const blacklistName = await page.evaluate(() => {
-                const topTitle = document.querySelector('h1, .advertiser-name, .ad-details-heading');
-                return topTitle ? topTitle.innerText.trim().toLowerCase() : '';
-            });
-
-            // =====================================================
-            // CRITICAL: Find the VISIBLE ad variation first
-            // On Google Ads Transparency, multiple ad variations load
-            // in different iframes, but only ONE is visible at a time.
-            // =====================================================
-            const visibleAdInfo = await page.evaluate(() => {
-                const carouselSelectors = [
-                    '[class*="carousel"] [class*="active"]',
-                    '[class*="slider"] [class*="active"]',
-                    '[class*="slide"]:not([class*="hidden"])',
-                    '[aria-hidden="false"]',
-                    '.ad-preview-container:not([hidden])',
-                    '[class*="creative-preview"]:not([style*="display: none"])',
-                    '[class*="ad-container"]:not([style*="display: none"])'
-                ];
-
-                let visibleContainer = null;
-                for (const sel of carouselSelectors) {
-                    const el = document.querySelector(sel);
-                    if (el && el.offsetWidth > 0 && el.offsetHeight > 0) {
-                        visibleContainer = sel;
-                        break;
-                    }
-                }
-
-                const iframes = document.querySelectorAll('iframe');
-                const visibleFrameUrls = [];
-
-                iframes.forEach(iframe => {
-                    const rect = iframe.getBoundingClientRect();
-                    const style = window.getComputedStyle(iframe);
-                    const isVisible = rect.width > 50 && rect.height > 50 &&
-                        style.display !== 'none' &&
-                        style.visibility !== 'hidden' &&
-                        parseFloat(style.opacity) > 0;
-
-                    let parent = iframe.parentElement;
-                    let parentVisible = true;
-                    while (parent) {
-                        const parentStyle = window.getComputedStyle(parent);
-                        if (parentStyle.display === 'none' ||
-                            parentStyle.visibility === 'hidden' ||
-                            parseFloat(parentStyle.opacity) === 0) {
-                            parentVisible = false;
-                            break;
-                        }
-                        parent = parent.parentElement;
-                    }
-
-                    if (isVisible && parentVisible) {
-                        visibleFrameUrls.push(iframe.src || iframe.name || 'unnamed');
-                    }
-                });
-
-                return {
-                    containerSelector: visibleContainer,
-                    visibleFrameUrls: visibleFrameUrls,
-                    totalFrames: iframes.length
-                };
-            });
-
-            console.log(`  📊 Found ${visibleAdInfo.totalFrames} iframes, ${visibleAdInfo.visibleFrameUrls.length} visible`);
-
-            // Extract from frames (visibility-aware logic from app_data_agent.js)
-            const frames = page.frames();
-            for (const frame of frames) {
-                try {
-                    const frameData = await frame.evaluate((blacklist) => {
-                        const data = { appName: null, storeLink: null };
-                        const root = document.querySelector('#portrait-landscape-phone') || document.body;
-
-                        // Check if this frame is actually visible
-                        const bodyRect = document.body.getBoundingClientRect();
-                        if (bodyRect.width < 50 || bodyRect.height < 50) {
-                            return { ...data, isHidden: true };
-                        }
-
-                        // Store link extraction with strict validation
-                        const extractStoreLink = (href) => {
-                            if (!href || typeof href !== 'string') return null;
-                            if (href.includes('javascript:') || href === '#') return null;
-
-                            const isValidStoreLink = (url) => {
-                                if (!url) return false;
-                                const isPlayStore = url.includes('play.google.com/store/apps') && url.includes('id=');
-                                const isAppStore = (url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/');
-                                return isPlayStore || isAppStore;
-                            };
-
-                            if (isValidStoreLink(href)) return href;
-
-                            // Extract from redirect URLs
-                            if (href.includes('googleadservices.com') || href.includes('/pagead/aclk')) {
-                                try {
-                                    const patterns = [/[?&]adurl=([^&\s]+)/i, /[?&]dest=([^&\s]+)/i, /[?&]url=([^&\s]+)/i];
-                                    for (const pattern of patterns) {
-                                        const match = href.match(pattern);
-                                        if (match && match[1]) {
-                                            const decoded = decodeURIComponent(match[1]);
-                                            if (isValidStoreLink(decoded)) return decoded;
-                                        }
-                                    }
-                                } catch (e) { }
-                            }
-
-                            // Direct regex match
-                            try {
-                                const playMatch = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
-                                if (playMatch && playMatch[1]) return playMatch[1];
-                                const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
-                                if (appMatch && appMatch[1]) return appMatch[1];
-                            } catch (e) { }
-
-                            return null;
-                        };
-
-                        // Clean app name
-                        const cleanAppName = (text) => {
-                            if (!text || typeof text !== 'string') return null;
-                            let clean = text.trim();
-                            clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
-                            clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' ');
-                            clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;/g, ' ');
-                            clean = clean.split('!@~!@~')[0];
-                            if (clean.includes('|')) {
-                                const parts = clean.split('|').map(p => p.trim()).filter(p => p.length > 2);
-                                if (parts.length > 0) clean = parts[0];
-                            }
-                            clean = clean.replace(/\s+/g, ' ').trim();
-                            if (clean.length < 2) return null;
-                            if (/^[\d\s\W]+$/.test(clean)) return null;
-                            return clean;
-                        };
-
-                        // Try app name selectors
-                        const appNameSelectors = [
-                            'a[data-asoch-targets*="ochAppName"]',
-                            'a[data-asoch-targets*="appname" i]',
-                            'a[class*="short-app-name"]',
-                            '.short-app-name a'
-                        ];
-
-                        for (const selector of appNameSelectors) {
-                            const elements = root.querySelectorAll(selector);
-                            for (const el of elements) {
-                                const rawName = el.innerText || el.textContent || '';
-                                const appName = cleanAppName(rawName);
-                                if (!appName || appName.toLowerCase() === blacklist) continue;
-
-                                const storeLink = extractStoreLink(el.href);
-                                if (appName && storeLink) {
-                                    return { appName, storeLink, isHidden: false };
-                                } else if (appName && !data.appName) {
-                                    data.appName = appName;
-                                }
-                            }
-                        }
-
-                        // Backup: Install button for link
-                        if (data.appName && !data.storeLink) {
-                            const installSels = [
-                                'a[data-asoch-targets*="ochButton"]',
-                                'a[data-asoch-targets*="Install" i]',
-                                'a[aria-label*="Install" i]'
-                            ];
-                            for (const sel of installSels) {
-                                const el = root.querySelector(sel);
-                                if (el && el.href) {
-                                    const storeLink = extractStoreLink(el.href);
-                                    if (storeLink) {
-                                        data.storeLink = storeLink;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        data.isHidden = false;
-                        return data;
-                    }, blacklistName);
-
-                    if (frameData.isHidden) continue;
-
-                    // Update result if we found complete data
-                    if (frameData.appName && frameData.storeLink && result.storeLink === 'NOT_FOUND') {
-                        result.appName = frameData.appName;
-                        result.storeLink = frameData.storeLink;
-                        console.log(`  ✓ Found: ${result.appName} -> ${result.storeLink.substring(0, 50)}...`);
-                        break;
-                    }
-
-                    // Store partial results
-                    if (frameData.appName && result.appName === 'NOT_FOUND') {
-                        result.appName = frameData.appName;
-                    }
-                    if (frameData.storeLink && result.storeLink === 'NOT_FOUND') {
-                        result.storeLink = frameData.storeLink;
-                    }
-                } catch (e) { }
-            }
-
-            // Clean up store link if it contains redirect
-            if (result.storeLink !== 'NOT_FOUND' && result.storeLink.includes('adurl=')) {
-                try {
-                    const urlObj = new URL(result.storeLink);
-                    const adUrl = urlObj.searchParams.get('adurl');
-                    if (adUrl && adUrl.startsWith('http')) result.storeLink = adUrl;
-                } catch (e) { }
-            }
+            const metaResult = await extractMetadata(url, page);
+            result.appName = metaResult.appName;
+            result.storeLink = metaResult.storeLink;
         }
 
-        // =====================================================
         // PHASE 2: VIDEO ID EXTRACTION
-        // =====================================================
-        // Determine if we should try to get video ID
         const finalStoreLink = result.storeLink !== 'SKIP' ? result.storeLink : existingStoreLink;
         const hasValidLink = finalStoreLink &&
             finalStoreLink !== 'NOT_FOUND' &&
             (finalStoreLink.includes('play.google.com') || finalStoreLink.includes('apps.apple.com'));
 
         if (needsVideoId || (needsMetadata && hasValidLink)) {
-            console.log(`  🎬 Attempting to extract Video ID...`);
-
-            // Find and click play button (logic from agent.js)
-            const playButtonInfo = await page.evaluate(() => {
-                const results = { found: false, x: 0, y: 0 };
-
-                const searchForPlayButton = (root) => {
-                    const playButton = root.querySelector('.play-button');
-                    if (playButton) {
-                        const rect = playButton.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            results.found = true;
-                            results.x = rect.left + rect.width / 2;
-                            results.y = rect.top + rect.height / 2;
-                            return true;
-                        }
-                    }
-                    const elements = root.querySelectorAll('*');
-                    for (const el of elements) {
-                        if (el.shadowRoot) {
-                            const found = searchForPlayButton(el.shadowRoot);
-                            if (found) return true;
-                        }
-                    }
-                    return false;
-                };
-
-                // Search in iframes first
-                const iframes = document.querySelectorAll('iframe');
-                for (let i = 0; i < iframes.length; i++) {
-                    try {
-                        const iframeDoc = iframes[i].contentDocument || iframes[i].contentWindow?.document;
-                        if (iframeDoc) {
-                            const found = searchForPlayButton(iframeDoc);
-                            if (found) break;
-                        }
-                    } catch (e) { }
-                }
-
-                // Fallback to main document
-                if (!results.found) searchForPlayButton(document);
-
-                // Fallback: Click center of visible iframe
-                if (!results.found) {
-                    for (const iframe of iframes) {
-                        const rect = iframe.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            results.found = true;
-                            results.x = rect.left + rect.width / 2;
-                            results.y = rect.top + rect.height / 2;
-                            break;
-                        }
-                    }
-                }
-
-                return results;
-            });
-
-            if (playButtonInfo.found) {
-                try {
-                    const client = await page.target().createCDPSession();
-                    await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: playButtonInfo.x, y: playButtonInfo.y });
-                    await sleep(100);
-                    await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
-                    await sleep(80);
-                    await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
-
-                    // Wait for video to load
-                    await sleep(VIDEO_WAIT_TIME);
-
-                    if (capturedVideoId) {
-                        result.videoId = capturedVideoId;
-                        console.log(`  ✓ Video ID: ${capturedVideoId}`);
-                    } else {
-                        result.videoId = 'NOT_FOUND';
-                        console.log(`  ⚠️ No video ID captured (might be text ad)`);
-                    }
-                } catch (e) {
-                    console.log(`  ⚠️ Click failed: ${e.message}`);
-                    result.videoId = 'NOT_FOUND';
-                }
-            } else {
-                // No play button = likely a text ad
-                result.videoId = hasValidLink ? 'NOT_FOUND' : 'SKIP';
-            }
+            console.log(`  🎬 Extracting Video ID...`);
+            result.videoId = await extractVideoId(page, capturedVideoId);
         }
 
         await page.close();
@@ -609,7 +694,7 @@ async function extractAllData(url, browser, needsMetadata, needsVideoId, existin
 
 async function extractWithRetry(item, browser) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        if (attempt > 1) console.log(`  🔄 Retry attempt ${attempt}/${MAX_RETRIES}...`);
+        if (attempt > 1) console.log(`  🔄 Retry ${attempt}/${MAX_RETRIES}...`);
 
         const data = await extractAllData(
             item.url,
@@ -621,7 +706,6 @@ async function extractWithRetry(item, browser) {
 
         if (data.storeLink === 'BLOCKED') return data;
 
-        // Success if we got something useful
         const gotMetadata = !item.needsMetadata || (data.storeLink !== 'NOT_FOUND' || data.appName !== 'NOT_FOUND');
         const gotVideoId = !item.needsVideoId || data.videoId !== 'NOT_FOUND';
 
@@ -631,8 +715,9 @@ async function extractWithRetry(item, browser) {
     }
     return { storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND' };
 }
+
 // ============================================
-// MAIN EXECUTION
+// MAIN EXECUTION (Pattern from app_data_agent.js)
 // ============================================
 (async () => {
     console.log(`🤖 Starting UNIFIED Google Ads Agent...\n`);
@@ -640,7 +725,7 @@ async function extractWithRetry(item, browser) {
     console.log(`⚡ Columns: A=Advertiser Name, B=Ads URL, C=App Link, D=App Name, E=Video ID\n`);
 
     const sessionStartTime = Date.now();
-    const MAX_RUNTIME = 330 * 60 * 1000; // 5.5 hours
+    const MAX_RUNTIME = 330 * 60 * 1000;
 
     const sheets = await getGoogleSheetsClient();
     const toProcess = await getUrlData(sheets);
@@ -650,19 +735,17 @@ async function extractWithRetry(item, browser) {
         process.exit(0);
     }
 
-    // Log summary
     const needsMeta = toProcess.filter(x => x.needsMetadata).length;
     const needsVideo = toProcess.filter(x => x.needsVideoId).length;
     console.log(`📊 Found ${toProcess.length} rows to process:`);
     console.log(`   - ${needsMeta} need metadata extraction`);
     console.log(`   - ${needsVideo} need video ID extraction\n`);
 
-    console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Proxy rotation disabled - running direct (no PROXIES env var)');
+    console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct (no PROXIES env var)');
 
     for (let i = 0; i < toProcess.length; i += CONCURRENT_PAGES) {
-        // Check for timeout
         if (Date.now() - sessionStartTime > MAX_RUNTIME) {
-            console.log('\n⏰ Reached time limit. Saving and restarting...');
+            console.log('\n⏰ Time limit reached. Restarting...');
             await triggerSelfRestart();
             process.exit(0);
         }
@@ -684,7 +767,7 @@ async function extractWithRetry(item, browser) {
             ];
             if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
 
-            console.log(`  🌐 Launching browser (proxy: ${proxy || 'DIRECT'})`);
+            console.log(`  🌐 Browser (proxy: ${proxy || 'DIRECT'})`);
             const browser = await puppeteer.launch({ headless: true, args: launchArgs });
 
             try {
@@ -698,28 +781,25 @@ async function extractWithRetry(item, browser) {
                     };
                 }));
 
-                // Debug output
                 results.forEach(r => {
                     console.log(`  → Row ${r.rowIndex + 1}: Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | VideoID=${r.videoId}`);
                 });
 
-                // Check for blocks
                 if (results.some(r => r.storeLink === 'BLOCKED')) {
-                    console.log('  🛑 Block detected on this proxy. Closing browser and rotating proxy...');
+                    console.log('  🛑 Block detected. Rotating...');
                     proxyStats.totalBlocks++;
                     proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
                     await browser.close();
                     proxyAttempts++;
                     if (proxyAttempts >= MAX_PROXY_ATTEMPTS) {
-                        console.log('  ❌ Max proxy attempts reached. Triggering self-restart.');
-                        console.log('  🔍 Proxy stats:', JSON.stringify(proxyStats));
+                        console.log('  ❌ Max attempts. Restarting...');
                         await triggerSelfRestart();
                         process.exit(0);
                     }
                     const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
-                    console.log(`  ⏳ Waiting ${Math.round(wait / 1000)}s before next proxy attempt...`);
-                    await new Promise(r => setTimeout(r, wait));
-                    continue; // try next proxy
+                    console.log(`  ⏳ Waiting ${Math.round(wait / 1000)}s...`);
+                    await sleep(wait);
+                    continue;
                 }
 
                 await batchWriteToSheet(sheets, results);
@@ -727,35 +807,28 @@ async function extractWithRetry(item, browser) {
                 await browser.close();
             } catch (err) {
                 console.error(`  ❌ Batch error: ${err.message}`);
-                proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
                 try { await browser.close(); } catch (e) { }
                 proxyAttempts++;
                 if (proxyAttempts >= MAX_PROXY_ATTEMPTS) {
-                    console.log('  ❌ Max proxy attempts reached due to errors. Triggering self-restart.');
-                    console.log('  🔍 Proxy stats:', JSON.stringify(proxyStats));
                     await triggerSelfRestart();
                     process.exit(0);
                 }
-                const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
-                console.log(`  ⏳ Waiting ${Math.round(wait / 1000)}s before next proxy attempt (error)...`);
-                await new Promise(r => setTimeout(r, wait));
+                await sleep(PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN));
             }
         }
 
-        // Random delay between batches
         const batchDelay = BATCH_DELAY_MIN + Math.random() * (BATCH_DELAY_MAX - BATCH_DELAY_MIN);
-        console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s before next batch...\n`);
-        await new Promise(r => setTimeout(r, batchDelay));
+        console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s...\n`);
+        await sleep(batchDelay);
     }
 
-    // Re-check for new data
     const remaining = await getUrlData(sheets);
     if (remaining.length > 0) {
-        console.log(`📈 ${remaining.length} more rows found. Restarting...`);
+        console.log(`📈 ${remaining.length} more rows. Restarting...`);
         await triggerSelfRestart();
     }
 
     console.log('🔍 Proxy stats:', JSON.stringify(proxyStats));
-    console.log('\n🏁 Unified workflow complete.');
+    console.log('\n🏁 Complete.');
     process.exit(0);
 })();
