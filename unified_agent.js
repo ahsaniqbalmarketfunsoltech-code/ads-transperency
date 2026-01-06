@@ -38,6 +38,19 @@ const RETRY_WAIT_MULTIPLIER = 1.5;
 const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000;
 const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 12000;
 
+// Proxy rotation settings (from app_data_agent.js)
+const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
+const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
+const PROXY_RETRY_DELAY_MIN = parseInt(process.env.PROXY_RETRY_DELAY_MIN) || 30000;
+const PROXY_RETRY_DELAY_MAX = parseInt(process.env.PROXY_RETRY_DELAY_MAX) || 90000;
+
+function pickProxy() {
+    if (!PROXIES.length) return null;
+    return PROXIES[Math.floor(Math.random() * PROXIES.length)];
+}
+
+const proxyStats = { totalBlocks: 0, perProxy: {} };
+
 // Anti-detection: Rotating User Agents
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -240,15 +253,17 @@ async function extractAllData(url, browser, needsMetadata, needsVideoId, existin
         await randomDelay(1000, 2000);
         await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
 
-        const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: MAX_WAIT_TIME });
+        const response = await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
         // Block detection
         const content = await page.content();
         if ((response && response.status && response.status() === 429) ||
             content.includes('Our systems have detected unusual traffic') ||
             content.includes('Too Many Requests') ||
-            content.toLowerCase().includes('captcha')) {
-            console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic.');
+            content.toLowerCase().includes('captcha') ||
+            content.toLowerCase().includes('g-recaptcha') ||
+            content.toLowerCase().includes('verify you are human')) {
+            console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic or captcha.');
             await page.close();
             return { storeLink: 'BLOCKED', appName: 'BLOCKED', videoId: 'BLOCKED' };
         }
@@ -271,9 +286,72 @@ async function extractAllData(url, browser, needsMetadata, needsVideoId, existin
 
             // Get blacklist name (advertiser name) to avoid confusion
             const blacklistName = await page.evaluate(() => {
-                const topTitle = document.querySelector('h1, .advertiser-name');
+                const topTitle = document.querySelector('h1, .advertiser-name, .ad-details-heading');
                 return topTitle ? topTitle.innerText.trim().toLowerCase() : '';
             });
+
+            // =====================================================
+            // CRITICAL: Find the VISIBLE ad variation first
+            // On Google Ads Transparency, multiple ad variations load
+            // in different iframes, but only ONE is visible at a time.
+            // =====================================================
+            const visibleAdInfo = await page.evaluate(() => {
+                const carouselSelectors = [
+                    '[class*="carousel"] [class*="active"]',
+                    '[class*="slider"] [class*="active"]',
+                    '[class*="slide"]:not([class*="hidden"])',
+                    '[aria-hidden="false"]',
+                    '.ad-preview-container:not([hidden])',
+                    '[class*="creative-preview"]:not([style*="display: none"])',
+                    '[class*="ad-container"]:not([style*="display: none"])'
+                ];
+
+                let visibleContainer = null;
+                for (const sel of carouselSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.offsetWidth > 0 && el.offsetHeight > 0) {
+                        visibleContainer = sel;
+                        break;
+                    }
+                }
+
+                const iframes = document.querySelectorAll('iframe');
+                const visibleFrameUrls = [];
+
+                iframes.forEach(iframe => {
+                    const rect = iframe.getBoundingClientRect();
+                    const style = window.getComputedStyle(iframe);
+                    const isVisible = rect.width > 50 && rect.height > 50 &&
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        parseFloat(style.opacity) > 0;
+
+                    let parent = iframe.parentElement;
+                    let parentVisible = true;
+                    while (parent) {
+                        const parentStyle = window.getComputedStyle(parent);
+                        if (parentStyle.display === 'none' ||
+                            parentStyle.visibility === 'hidden' ||
+                            parseFloat(parentStyle.opacity) === 0) {
+                            parentVisible = false;
+                            break;
+                        }
+                        parent = parent.parentElement;
+                    }
+
+                    if (isVisible && parentVisible) {
+                        visibleFrameUrls.push(iframe.src || iframe.name || 'unnamed');
+                    }
+                });
+
+                return {
+                    containerSelector: visibleContainer,
+                    visibleFrameUrls: visibleFrameUrls,
+                    totalFrames: iframes.length
+                };
+            });
+
+            console.log(`  📊 Found ${visibleAdInfo.totalFrames} iframes, ${visibleAdInfo.visibleFrameUrls.length} visible`);
 
             // Extract from frames (visibility-aware logic from app_data_agent.js)
             const frames = page.frames();
@@ -553,7 +631,6 @@ async function extractWithRetry(item, browser) {
     }
     return { storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND' };
 }
-
 // ============================================
 // MAIN EXECUTION
 // ============================================
@@ -580,25 +657,12 @@ async function extractWithRetry(item, browser) {
     console.log(`   - ${needsMeta} need metadata extraction`);
     console.log(`   - ${needsVideo} need video ID extraction\n`);
 
-    const browser = await puppeteer.launch({
-        headless: true,
-        defaultViewport: { width: 1920, height: 1080 },
-        args: [
-            '--autoplay-policy=no-user-gesture-required',
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage'
-        ]
-    });
-
-    console.log(`🌐 Browser launched - Processing ${CONCURRENT_PAGES} URLs at a time\n`);
+    console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Proxy rotation disabled - running direct (no PROXIES env var)');
 
     for (let i = 0; i < toProcess.length; i += CONCURRENT_PAGES) {
         // Check for timeout
         if (Date.now() - sessionStartTime > MAX_RUNTIME) {
             console.log('\n⏰ Reached time limit. Saving and restarting...');
-            await browser.close();
             await triggerSelfRestart();
             process.exit(0);
         }
@@ -606,38 +670,83 @@ async function extractWithRetry(item, browser) {
         const batch = toProcess.slice(i, i + CONCURRENT_PAGES);
         console.log(`📦 Batch ${Math.floor(i / CONCURRENT_PAGES) + 1}/${Math.ceil(toProcess.length / CONCURRENT_PAGES)}`);
 
-        const results = await Promise.all(batch.map(async (item) => {
-            const data = await extractWithRetry(item, browser);
-            return {
-                rowIndex: item.rowIndex,
-                storeLink: data.storeLink,
-                appName: data.appName,
-                videoId: data.videoId
-            };
-        }));
+        let proxyAttempts = 0;
+        let handled = false;
 
-        // Check for blocks
-        if (results.some(r => r.storeLink === 'BLOCKED')) {
-            console.log('🛑 Block detected. Restarting to get fresh IP...');
-            await browser.close();
-            await triggerSelfRestart();
-            process.exit(0);
+        while (!handled && proxyAttempts < MAX_PROXY_ATTEMPTS) {
+            const proxy = pickProxy();
+            const launchArgs = [
+                '--autoplay-policy=no-user-gesture-required',
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage'
+            ];
+            if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
+
+            console.log(`  🌐 Launching browser (proxy: ${proxy || 'DIRECT'})`);
+            const browser = await puppeteer.launch({ headless: true, args: launchArgs });
+
+            try {
+                const results = await Promise.all(batch.map(async (item) => {
+                    const data = await extractWithRetry(item, browser);
+                    return {
+                        rowIndex: item.rowIndex,
+                        storeLink: data.storeLink,
+                        appName: data.appName,
+                        videoId: data.videoId
+                    };
+                }));
+
+                // Debug output
+                results.forEach(r => {
+                    console.log(`  → Row ${r.rowIndex + 1}: Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | VideoID=${r.videoId}`);
+                });
+
+                // Check for blocks
+                if (results.some(r => r.storeLink === 'BLOCKED')) {
+                    console.log('  🛑 Block detected on this proxy. Closing browser and rotating proxy...');
+                    proxyStats.totalBlocks++;
+                    proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
+                    await browser.close();
+                    proxyAttempts++;
+                    if (proxyAttempts >= MAX_PROXY_ATTEMPTS) {
+                        console.log('  ❌ Max proxy attempts reached. Triggering self-restart.');
+                        console.log('  🔍 Proxy stats:', JSON.stringify(proxyStats));
+                        await triggerSelfRestart();
+                        process.exit(0);
+                    }
+                    const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
+                    console.log(`  ⏳ Waiting ${Math.round(wait / 1000)}s before next proxy attempt...`);
+                    await new Promise(r => setTimeout(r, wait));
+                    continue; // try next proxy
+                }
+
+                await batchWriteToSheet(sheets, results);
+                handled = true;
+                await browser.close();
+            } catch (err) {
+                console.error(`  ❌ Batch error: ${err.message}`);
+                proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
+                try { await browser.close(); } catch (e) { }
+                proxyAttempts++;
+                if (proxyAttempts >= MAX_PROXY_ATTEMPTS) {
+                    console.log('  ❌ Max proxy attempts reached due to errors. Triggering self-restart.');
+                    console.log('  🔍 Proxy stats:', JSON.stringify(proxyStats));
+                    await triggerSelfRestart();
+                    process.exit(0);
+                }
+                const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
+                console.log(`  ⏳ Waiting ${Math.round(wait / 1000)}s before next proxy attempt (error)...`);
+                await new Promise(r => setTimeout(r, wait));
+            }
         }
-
-        // Debug output
-        results.forEach(r => {
-            console.log(`  → Row ${r.rowIndex + 1}: Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | VideoID=${r.videoId}`);
-        });
-
-        await batchWriteToSheet(sheets, results);
 
         // Random delay between batches
         const batchDelay = BATCH_DELAY_MIN + Math.random() * (BATCH_DELAY_MAX - BATCH_DELAY_MIN);
         console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s before next batch...\n`);
         await new Promise(r => setTimeout(r, batchDelay));
     }
-
-    await browser.close();
 
     // Re-check for new data
     const remaining = await getUrlData(sheets);
@@ -646,6 +755,7 @@ async function extractWithRetry(item, browser) {
         await triggerSelfRestart();
     }
 
+    console.log('🔍 Proxy stats:', JSON.stringify(proxyStats));
     console.log('\n🏁 Unified workflow complete.');
     process.exit(0);
 })();
