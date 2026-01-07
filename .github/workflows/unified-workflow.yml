@@ -7,17 +7,15 @@ on:
     - cron: '0 12 * * *'  # 5:00 PM PKT
     - cron: '0 18 * * *'  # 11:00 PM PKT
   workflow_dispatch:
-  repository_dispatch:
-    types: [unified_agent_trigger]
 
 concurrency:
   group: unified-agent-group
-  cancel-in-progress: false # Change to false to ensure we don't kill a job that's making progress
+  cancel-in-progress: false
 
 jobs:
   run-unified-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 355 # 5 hours 55 minutes
     
     steps:
       - name: Checkout repository
@@ -56,16 +54,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           CONCURRENT_PAGES: 2
-      
-      - name: Auto-restart on failure
-        if: failure()
-        run: |
-          echo "⚠️ Workflow failed. Triggering immediate restart..."
-          curl -X POST \
-            -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/dispatches \
-            -d '{"event_type": "unified_agent_trigger"}'
 
       - name: Cleanup credentials
         if: always()

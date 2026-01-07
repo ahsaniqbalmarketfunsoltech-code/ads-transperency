@@ -18,20 +18,6 @@ puppeteer.use(StealthPlugin());
 const { google } = require('googleapis');
 const fs = require('fs');
 
-// GLOBAL ERROR HANDLERS FOR "RUN IN EVERY CONDITION"
-process.on('uncaughtException', async (err) => {
-    console.error('\n🔥 UNCAUGHT EXCEPTION:', err.message);
-    if (err.stack) console.error(err.stack);
-    await triggerSelfRestart();
-    process.exit(1);
-});
-
-process.on('unhandledRejection', async (reason, promise) => {
-    console.error('\n🔥 UNHANDLED REJECTION at:', promise, 'reason:', reason);
-    await triggerSelfRestart();
-    process.exit(1);
-});
-
 // ============================================
 // CONFIGURATION
 // ============================================
@@ -160,32 +146,6 @@ async function batchWriteToSheet(sheets, updates) {
     } catch (error) {
         console.error(`  ❌ Write error:`, error.message);
     }
-}
-
-async function triggerSelfRestart() {
-    const repo = process.env.GITHUB_REPOSITORY;
-    const token = process.env.GH_TOKEN;
-    if (!repo || !token) return;
-
-    console.log(`\n🔄 Triggering auto-restart...`);
-    const https = require('https');
-    const reqData = JSON.stringify({ event_type: 'unified_agent_trigger' });
-    const options = {
-        hostname: 'api.github.com',
-        port: 443,
-        path: `/repos/${repo}/dispatches`,
-        method: 'POST',
-        headers: {
-            'Authorization': `token ${token}`,
-            'User-Agent': 'Node.js',
-            'Accept': 'application/vnd.github.v3+json',
-            'Content-Type': 'application/json',
-            'Content-Length': reqData.length
-        }
-    };
-    const req = https.request(options);
-    req.write(reqData);
-    req.end();
 }
 
 // ============================================
@@ -690,8 +650,7 @@ async function extractWithRetry(item, browser) {
 
     while (currentIndex < toProcess.length) {
         if (Date.now() - sessionStartTime > MAX_RUNTIME) {
-            console.log('\n⏰ Time limit. Restarting...');
-            await triggerSelfRestart();
+            console.log('\n⏰ Time limit reached. Stopping.');
             process.exit(0);
         }
 
@@ -731,8 +690,7 @@ async function extractWithRetry(item, browser) {
             try {
                 browser = await puppeteer.launch({ headless: 'new', args: launchArgs });
             } catch (retryError) {
-                console.error(`  ❌ Failed to launch browser on retry. Restarting workflow...`);
-                await triggerSelfRestart();
+                console.error(`  ❌ Failed to launch browser on retry. Exiting.`);
                 process.exit(1);
             }
         }
@@ -799,8 +757,7 @@ async function extractWithRetry(item, browser) {
 
     const remaining = await getUrlData(sheets);
     if (remaining.length > 0) {
-        console.log(`📈 ${remaining.length} more rows. Restarting...`);
-        await triggerSelfRestart();
+        console.log(`📈 ${remaining.length} rows remaining for next scheduled run.`);
     }
 
     console.log('🔍 Proxy stats:', JSON.stringify(proxyStats));
