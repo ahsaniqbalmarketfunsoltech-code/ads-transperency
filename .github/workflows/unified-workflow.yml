@@ -32,7 +32,7 @@ jobs:
       - name: Install system dependencies for Puppeteer
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgbm1 libasound2 libnss3 libxss1 libatk-bridge2.0-0 libgtk-3-0 libxshmfence1
+          sudo apt-get install -y libgbm1 libasound2t64 libnss3 libxss1 libatk-bridge2.0-0 libgtk-3-0 libxshmfence1
       
       - name: Install dependencies
         run: npm ci
