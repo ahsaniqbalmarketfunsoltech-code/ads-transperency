@@ -671,32 +671,66 @@ async function extractWithRetry(item, browser) {
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-    for (let i = 0; i < toProcess.length; i += CONCURRENT_PAGES) {
+    const PAGES_PER_BROWSER = 40;
+    let currentIndex = 0;
+
+    while (currentIndex < toProcess.length) {
         if (Date.now() - sessionStartTime > MAX_RUNTIME) {
             console.log('\n⏰ Time limit. Restarting...');
             await triggerSelfRestart();
             process.exit(0);
         }
 
-        const batch = toProcess.slice(i, i + CONCURRENT_PAGES);
-        console.log(`📦 Batch ${Math.floor(i / CONCURRENT_PAGES) + 1}/${Math.ceil(toProcess.length / CONCURRENT_PAGES)}`);
+        const remainingCount = toProcess.length - currentIndex;
+        const currentSessionSize = Math.min(PAGES_PER_BROWSER, remainingCount);
 
-        let proxyAttempts = 0;
-        let handled = false;
+        console.log(`\n🏢 Starting New Browser Session (Items ${currentIndex + 1} - ${currentIndex + currentSessionSize})`);
 
-        while (!handled && proxyAttempts < MAX_PROXY_ATTEMPTS) {
-            const proxy = pickProxy();
-            const launchArgs = [
-                '--autoplay-policy=no-user-gesture-required',
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage'
-            ];
-            if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
+        let launchArgs = [
+            '--autoplay-policy=no-user-gesture-required',
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-zygote',
+            '--single-process',
+            '--disable-software-rasterizer',
+            '--no-first-run'
+        ];
 
-            console.log(`  🌐 Browser (proxy: ${proxy || 'DIRECT'})`);
-            const browser = await puppeteer.launch({ headless: true, args: launchArgs });
+        const proxy = pickProxy();
+        if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
+
+        console.log(`  🌐 Browser (proxy: ${proxy || 'DIRECT'})`);
+
+        let browser;
+        try {
+            browser = await puppeteer.launch({
+                headless: 'new',
+                args: launchArgs,
+                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
+            });
+        } catch (launchError) {
+            console.error(`  ❌ Failed to launch browser: ${launchError.message}`);
+            await sleep(5000);
+            try {
+                browser = await puppeteer.launch({ headless: 'new', args: launchArgs });
+            } catch (retryError) {
+                console.error(`  ❌ Failed to launch browser on retry. Restarting workflow...`);
+                await triggerSelfRestart();
+                process.exit(1);
+            }
+        }
+
+        let sessionProcessed = 0;
+        let blocked = false;
+
+        while (sessionProcessed < currentSessionSize && !blocked) {
+            const batchSize = Math.min(CONCURRENT_PAGES, currentSessionSize - sessionProcessed);
+            const batch = toProcess.slice(currentIndex, currentIndex + batchSize);
+
+            console.log(`📦 Batch ${currentIndex + 1}-${currentIndex + batchSize} / ${toProcess.length}`);
 
             try {
                 const results = await Promise.all(batch.map(async (item) => {
@@ -715,40 +749,38 @@ async function extractWithRetry(item, browser) {
                 });
 
                 if (results.some(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED')) {
-                    console.log('  🛑 Block detected. Rotating...');
+                    console.log('  🛑 Block detected. Closing browser and rotating...');
                     proxyStats.totalBlocks++;
                     proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
-                    await browser.close();
-                    proxyAttempts++;
-                    if (proxyAttempts >= MAX_PROXY_ATTEMPTS) {
-                        console.log('  ❌ Max attempts. Restarting...');
-                        await triggerSelfRestart();
-                        process.exit(0);
-                    }
-                    const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
-                    console.log(`  ⏳ Waiting ${Math.round(wait / 1000)}s...`);
-                    await sleep(wait);
-                    continue;
+                    blocked = true;
+                } else {
+                    await batchWriteToSheet(sheets, results);
+                    currentIndex += batchSize;
+                    sessionProcessed += batchSize;
                 }
-
-                await batchWriteToSheet(sheets, results);
-                handled = true;
-                await browser.close();
             } catch (err) {
                 console.error(`  ❌ Batch error: ${err.message}`);
-                try { await browser.close(); } catch (e) { }
-                proxyAttempts++;
-                if (proxyAttempts >= MAX_PROXY_ATTEMPTS) {
-                    await triggerSelfRestart();
-                    process.exit(0);
-                }
-                await sleep(PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN));
+                currentIndex += batchSize;
+                sessionProcessed += batchSize;
+            }
+
+            if (!blocked) {
+                const batchDelay = BATCH_DELAY_MIN + Math.random() * (BATCH_DELAY_MAX - BATCH_DELAY_MIN);
+                console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s...`);
+                await sleep(batchDelay);
             }
         }
 
-        const batchDelay = BATCH_DELAY_MIN + Math.random() * (BATCH_DELAY_MAX - BATCH_DELAY_MIN);
-        console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s...\n`);
-        await sleep(batchDelay);
+        try {
+            await browser.close();
+            await sleep(2000);
+        } catch (e) { }
+
+        if (blocked) {
+            const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
+            console.log(`  ⏳ Block wait: ${Math.round(wait / 1000)}s...`);
+            await sleep(wait);
+        }
     }
 
     const remaining = await getUrlData(sheets);
