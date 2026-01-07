@@ -26,7 +26,7 @@ const SHEET_NAME = 'Sheet1';
 const CREDENTIALS_PATH = './credentials.json';
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Increased for speed
 const MAX_WAIT_TIME = 60000;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 4;
 const POST_CLICK_WAIT = 8000; // Reduced from 12s
 const RETRY_WAIT_MULTIPLIER = 1.3; // Reduced from 1.5
 
@@ -219,8 +219,23 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         if (requestUrl.includes('googlevideo.com/videoplayback')) {
             const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
             const id = urlParams.get('id');
-            if (id && /^[a-f0-9]{16}$/.test(id)) {
+            if (id && /^[a-f0-9]{18}$|^[a-f0-9]{16}$/.test(id)) {
                 capturedVideoId = id;
+            }
+        }
+        // Capture from YouTube embeds
+        else if (requestUrl.includes('youtube.com/embed/')) {
+            const match = requestUrl.match(/\/embed\/([^?]+)/);
+            if (match && match[1]) {
+                capturedVideoId = match[1];
+            }
+        }
+        // Capture from YouTube get_video_info or watch
+        else if (requestUrl.includes('youtube.com/watch') || requestUrl.includes('youtube.com/get_video_info')) {
+            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
+            const v = urlParams.get('video_id') || urlParams.get('v');
+            if (v && v.length >= 11) {
+                capturedVideoId = v;
             }
         }
 
@@ -510,21 +525,23 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             const playButtonInfo = await page.evaluate(() => {
                 const results = { found: false, x: 0, y: 0 };
                 const searchForPlayButton = (root) => {
-                    const playButton = root.querySelector('.play-button');
-                    if (playButton) {
-                        const rect = playButton.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            results.found = true;
-                            results.x = rect.left + rect.width / 2;
-                            results.y = rect.top + rect.height / 2;
-                            return true;
+                    const playSelectors = ['.play-button', '.ytp-large-play-button', '.ytp-play-button', 'video', '[aria-label*="Play" i]'];
+                    for (const sel of playSelectors) {
+                        const btn = root.querySelector(sel);
+                        if (btn) {
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width > 5 && rect.height > 5) {
+                                results.found = true;
+                                results.x = rect.left + rect.width / 2;
+                                results.y = rect.top + rect.height / 2;
+                                return true;
+                            }
                         }
                     }
                     const elements = root.querySelectorAll('*');
                     for (const el of elements) {
                         if (el.shadowRoot) {
-                            const found = searchForPlayButton(el.shadowRoot);
-                            if (found) return true;
+                            if (searchForPlayButton(el.shadowRoot)) return true;
                         }
                     }
                     return false;
@@ -566,9 +583,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     await sleep(80);
                     await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
 
-                    // Wait for video to load
+                    // Wait for video to load (poll for capturedVideoId)
                     const waitTime = POST_CLICK_WAIT * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
-                    await sleep(waitTime);
+                    const startTime = Date.now();
+                    while (Date.now() - startTime < waitTime && !capturedVideoId) {
+                        await sleep(500);
+                    }
 
                     if (capturedVideoId) {
                         result.videoId = capturedVideoId;
@@ -611,13 +631,34 @@ async function extractWithRetry(item, browser) {
 
         if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
 
-        const gotMetadata = !item.needsMetadata || (data.storeLink !== 'NOT_FOUND' || data.appName !== 'NOT_FOUND');
-        const gotVideoId = !item.needsVideoId || data.videoId !== 'NOT_FOUND';
+        // Determine if we have a valid store link (either from before or just found)
+        const currentStoreLink = (data.storeLink && data.storeLink !== 'SKIP' && data.storeLink !== 'NOT_FOUND')
+            ? data.storeLink
+            : item.existingStoreLink;
 
-        if (gotMetadata || gotVideoId) return data;
+        const hasValidLink = currentStoreLink &&
+            (currentStoreLink.includes('play.google.com') || currentStoreLink.includes('apps.apple.com'));
+
+        // Success criteria:
+        // 1. If we needed metadata, did we find it? (at least one of appName or storeLink)
+        const metadataSuccess = !item.needsMetadata || (data.storeLink !== 'NOT_FOUND' || data.appName !== 'NOT_FOUND');
+
+        // 2. If we have a valid link, do we have a video ID?
+        // We only consider it a videoSuccess if:
+        // - There is no valid link (text ad) -> always success/skip
+        // - There is a valid link AND we got a video ID
+        const videoSuccess = !hasValidLink || (data.videoId !== 'NOT_FOUND' && data.videoId !== 'SKIP' && data.videoId !== null);
+
+        // We only return if BOTH are successful
+        if (metadataSuccess && videoSuccess) {
+            return data;
+        } else {
+            console.log(`  ⚠️ Attempt ${attempt} partial success: Metadata=${metadataSuccess}, Video=${videoSuccess}. Retrying...`);
+        }
 
         await randomDelay(2000, 4000);
     }
+    // If we're here, we exhausted retries. Return whatever we have.
     return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND' };
 }
 
