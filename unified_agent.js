@@ -135,8 +135,8 @@ async function batchWriteToSheet(sheets, updates) {
             data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
         }
 
-        // Write Timestamp to Column M
-        const timestamp = new Date().toLocaleString();
+        // Write Timestamp to Column M (Pakistan Time)
+        const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
         data.push({ range: `${SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
     });
 
