@@ -1,23 +1,32 @@
-name: Unified Google Ads Agent (DEPRECATED - Use dual-agent-workflow.yml)
+name: Dual Google Ads Agent (Top + Bottom)
 
-# DISABLED: This workflow is replaced by dual-agent-workflow.yml which runs both agents in parallel
-# You can still trigger this manually using workflow_dispatch if needed
 on:
-  # schedule:
-  #   - cron: '0 0 * * *'   # 5:00 AM PKT
-  #   - cron: '0 6 * * *'   # 11:00 AM PKT
-  #   - cron: '0 12 * * *'  # 5:00 PM PKT
-  #   - cron: '0 18 * * *'  # 11:00 PM PKT
+  schedule:
+    - cron: '0 0 * * *'   # 5:00 AM PKT
+    - cron: '0 6 * * *'   # 11:00 AM PKT
+    - cron: '0 12 * * *'  # 5:00 PM PKT
+    - cron: '0 18 * * *'  # 11:00 PM PKT
   workflow_dispatch:
 
 concurrency:
-  group: unified-agent-group
+  group: dual-agent-group
   cancel-in-progress: false
 
 jobs:
-  run-unified-agent:
+  run-agents:
     runs-on: ubuntu-latest
     timeout-minutes: 355 # 5 hours 55 minutes
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        agent:
+          - name: "Forward Agent (Top to Bottom)"
+            script: "unified_agent.js"
+            direction: "forward"
+          - name: "Reverse Agent (Bottom to Top)"
+            script: "unified_agent_reverse.js"
+            direction: "reverse"
     
     steps:
       - name: Checkout repository
@@ -39,19 +48,20 @@ jobs:
       
       - name: Create credentials file
         run: |
-          cat > credentials.json << EOF
+          cat > credentials.json <<EOF
           ${{ secrets.GOOGLE_CREDENTIALS }}
           EOF
         shell: bash
       
       - name: Log run start
         run: |
-          echo "🚀 Starting UNIFIED Google Ads Agent at $(date)"
+          echo "🚀 Starting ${{ matrix.agent.name }} at $(date)"
           echo "📊 System environment: $(uname -a)"
+          echo "🔄 Direction: ${{ matrix.agent.direction }}"
       
-      - name: Run unified agent script
+      - name: Run agent script
         id: run_script
-        run: node unified_agent.js
+        run: node ${{ matrix.agent.script }}
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
