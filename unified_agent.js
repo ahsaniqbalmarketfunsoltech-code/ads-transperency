@@ -31,13 +31,13 @@ const MAX_RETRIES = 4;
 const POST_CLICK_WAIT = 6000; // Reduced from 8s
 const RETRY_WAIT_MULTIPLIER = 1.25; // Smoother retry scaling
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 3500; // Faster batches
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 7000; // Faster batches
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 3000; // Faster batches
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 6000; // Faster batches
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
-const PROXY_RETRY_DELAY_MIN = parseInt(process.env.PROXY_RETRY_DELAY_MIN) || 30000;
-const PROXY_RETRY_DELAY_MAX = parseInt(process.env.PROXY_RETRY_DELAY_MAX) || 90000;
+const PROXY_RETRY_DELAY_MIN = parseInt(process.env.PROXY_RETRY_DELAY_MIN) || 25000;
+const PROXY_RETRY_DELAY_MAX = parseInt(process.env.PROXY_RETRY_DELAY_MAX) || 75000;
 
 function pickProxy() {
     if (!PROXIES.length) return null;
