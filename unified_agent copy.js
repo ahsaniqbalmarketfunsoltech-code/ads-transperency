@@ -25,6 +25,7 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Test data'; // Can be overridden via env var
 const CREDENTIALS_PATH = './credentials.json';
+const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 1000; // Rows to load per batch
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 4;
@@ -88,40 +89,78 @@ async function getGoogleSheetsClient() {
     return google.sheets({ version: 'v4', auth: authClient });
 }
 
-async function getUrlData(sheets) {
-    const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:E`,
-    });
-    const rows = response.data.values || [];
+async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     const toProcess = [];
+    let startRow = 1; // Start from row 2 (skip header)
+    let hasMoreData = true;
+    let totalProcessed = 0;
 
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
-        const url = row[1]?.trim() || '';
-        const storeLink = row[2]?.trim() || '';
-        const appName = row[3]?.trim() || '';
-        const videoId = row[4]?.trim() || '';
+    console.log(`📊 Loading data in batches of ${batchSize} rows...`);
 
-        if (!url) continue;
-
-        const needsMetadata = !storeLink || !appName;
-        const hasValidStoreLink = storeLink &&
-            storeLink !== 'NOT_FOUND' &&
-            (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
-        const needsVideoId = hasValidStoreLink && !videoId;
-
-        if (needsMetadata || needsVideoId) {
-            toProcess.push({
-                url,
-                rowIndex: i,
-                needsMetadata,
-                needsVideoId,
-                existingStoreLink: storeLink
+    while (hasMoreData) {
+        try {
+            const endRow = startRow + batchSize - 1;
+            const range = `${SHEET_NAME}!A${startRow + 1}:E${endRow + 1}`; // +1 because Google Sheets is 1-indexed
+            
+            const response = await sheets.spreadsheets.values.get({
+                spreadsheetId: SPREADSHEET_ID,
+                range: range,
             });
+            
+            const rows = response.data.values || [];
+            
+            if (rows.length === 0) {
+                hasMoreData = false;
+                break;
+            }
+
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                const actualRowIndex = startRow + i; // Actual row number in sheet
+                const url = row[1]?.trim() || '';
+                const storeLink = row[2]?.trim() || '';
+                const appName = row[3]?.trim() || '';
+                const videoId = row[4]?.trim() || '';
+
+                if (!url) continue;
+
+                const needsMetadata = !storeLink || !appName;
+                const hasValidStoreLink = storeLink &&
+                    storeLink !== 'NOT_FOUND' &&
+                    (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
+                const needsVideoId = hasValidStoreLink && !videoId;
+
+                if (needsMetadata || needsVideoId) {
+                    toProcess.push({
+                        url,
+                        rowIndex: actualRowIndex,
+                        needsMetadata,
+                        needsVideoId,
+                        existingStoreLink: storeLink
+                    });
+                }
+            }
+
+            totalProcessed += rows.length;
+            console.log(`  ✓ Processed ${totalProcessed} rows, found ${toProcess.length} to process`);
+
+            // If we got less than batchSize rows, we've reached the end
+            if (rows.length < batchSize) {
+                hasMoreData = false;
+            } else {
+                startRow = endRow + 1;
+                // Small delay between batches to avoid rate limits
+                await sleep(100);
+            }
+        } catch (error) {
+            console.error(`  ⚠️ Error loading batch starting at row ${startRow}: ${error.message}`);
+            // If error, try to continue with next batch
+            startRow += batchSize;
+            await sleep(500); // Wait a bit longer on error
         }
     }
 
+    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing\n`);
     return toProcess;
 }
 
@@ -382,10 +421,48 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (balanced for speed and safety)
-        const baseWait = 3000 + Math.random() * 2000; // Balanced: 3000-5000ms
+        // Wait for dynamic elements to settle (increased for large datasets)
+        const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
+
+        // Additional wait specifically for iframes to render (critical for Play Store links in large datasets)
+        try {
+            await page.evaluate(async () => {
+                const iframes = document.querySelectorAll('iframe');
+                if (iframes.length > 0) {
+                    await new Promise(resolve => {
+                        let loaded = 0;
+                        const totalIframes = iframes.length;
+                        const checkLoaded = () => {
+                            loaded++;
+                            if (loaded >= totalIframes) {
+                                setTimeout(resolve, 1500); // Extra time after all iframes load
+                            }
+                        };
+                        iframes.forEach(iframe => {
+                            try {
+                                if (iframe.contentDocument && iframe.contentDocument.readyState === 'complete') {
+                                    checkLoaded();
+                                } else {
+                                    iframe.onload = checkLoaded;
+                                    // Timeout after 4 seconds per iframe
+                                    setTimeout(checkLoaded, 4000);
+                                }
+                            } catch (e) {
+                                // Cross-origin iframe, count as loaded
+                                checkLoaded();
+                            }
+                        });
+                        // If no iframes, resolve immediately
+                        if (totalIframes === 0) resolve();
+                    });
+                }
+            });
+        } catch (e) {
+            // If iframe check fails, wait a bit anyway
+            await sleep(1000);
+        }
 
         // Random mouse movements for more human-like behavior
         try {
