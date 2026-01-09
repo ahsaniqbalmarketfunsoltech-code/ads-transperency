@@ -14,7 +14,7 @@ on:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # Pin to 22.04 for package compatibility
     timeout-minutes: 360  # 6 hours max runtime
     
     steps:
@@ -26,9 +26,6 @@ jobs:
         with:
           node-version: '18'
           cache: 'npm'
-      
-      - name: Install dependencies
-        run: npm ci
       
       - name: Install Puppeteer dependencies
         run: |
@@ -70,6 +67,9 @@ jobs:
             lsb-release \
             wget \
             xdg-utils
+      
+      - name: Install dependencies
+        run: npm ci
       
       - name: Run Unified Agent
         env:
