@@ -81,7 +81,7 @@ jobs:
       - name: Run Unified Agent Bottom (Sheet1 - Bottom to Top)
         if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         env:
-          CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '8' }}
+          CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '2' }}
           BATCH_DELAY_MIN: ${{ secrets.BATCH_DELAY_MIN || '3000' }}
           BATCH_DELAY_MAX: ${{ secrets.BATCH_DELAY_MAX || '6000' }}
           PROXIES: ${{ secrets.PROXIES }}
