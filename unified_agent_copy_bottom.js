@@ -26,7 +26,7 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Test data'; // Can be overridden via env var
 const CREDENTIALS_PATH = './credentials.json';
-const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 1000; // Rows to load per batch
+const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 10000; // Rows to load per batch
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 4;
@@ -92,11 +92,11 @@ async function getGoogleSheetsClient() {
 
 async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     const toProcess = [];
-    
+
     // First, get the total number of rows by loading a large range
     // We'll use a large range to find the last row, then work backwards
     console.log(`📊 Finding total rows and loading data from bottom to top in batches of ${batchSize} rows...`);
-    
+
     // Get a large range to find the last row (start from row 1, get up to 10000 rows)
     let totalRows = 0;
     try {
@@ -112,35 +112,35 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
         // Fallback: try to get rows in batches from bottom
         totalRows = 100000; // Assume large number, will stop when no more data
     }
-    
+
     if (totalRows <= 1) {
         console.log(`📊 No data rows found\n`);
         return toProcess;
     }
-    
+
     // Process from bottom to top in batches
     let endRow = totalRows; // Start from the last row
     let hasMoreData = true;
     let totalProcessed = 0;
-    
+
     while (hasMoreData && endRow > 1) {
         try {
             // Calculate start row for this batch (working backwards)
             const startRow = Math.max(2, endRow - batchSize + 1); // Row 2 is first data row (skip header)
             const range = `${SHEET_NAME}!A${startRow}:E${endRow}`;
-            
+
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
                 range: range,
             });
-            
+
             const rows = response.data.values || [];
-            
+
             if (rows.length === 0) {
                 hasMoreData = false;
                 break;
             }
-            
+
             // Process rows in reverse order (from bottom to top within this batch)
             for (let i = rows.length - 1; i >= 0; i--) {
                 const row = rows[i];
@@ -149,15 +149,15 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 const storeLink = row[2]?.trim() || '';
                 const appName = row[3]?.trim() || '';
                 const videoId = row[4]?.trim() || '';
-                
+
                 if (!url) continue;
-                
+
                 const needsMetadata = !storeLink || !appName;
                 const hasValidStoreLink = storeLink &&
                     storeLink !== 'NOT_FOUND' &&
                     (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
                 const needsVideoId = hasValidStoreLink && !videoId;
-                
+
                 if (needsMetadata || needsVideoId) {
                     toProcess.push({
                         url,
@@ -168,13 +168,13 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                     });
                 }
             }
-            
+
             totalProcessed += rows.length;
             console.log(`  ✓ Processed ${totalProcessed} rows (from bottom), found ${toProcess.length} to process`);
-            
+
             // Move to next batch (going backwards)
             endRow = startRow - 1;
-            
+
             // If we've reached row 1 (header), we're done
             if (endRow <= 1) {
                 hasMoreData = false;
@@ -192,7 +192,7 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
             await sleep(500); // Wait a bit longer on error
         }
     }
-    
+
     console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing (from bottom to top)\n`);
     return toProcess;
 }
