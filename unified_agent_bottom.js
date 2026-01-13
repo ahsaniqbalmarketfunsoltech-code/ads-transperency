@@ -441,47 +441,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             }
         } catch (e) { /* Ignore if CDP fails */ }
 
-        // =====================================================
-        // EARLY TEXT AD DETECTION - Skip text ads entirely
-        // Only process video ads for Play Store links
-        // =====================================================
-        const isTextAd = await page.evaluate(() => {
-            // Check for video elements
-            const videoEl = document.querySelector('video');
-            if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return false;
-
-            // Check page text for video indicators
-            const bodyText = document.body.innerText.toLowerCase();
-            if (bodyText.includes('format: video') || bodyText.includes('video ad')) return false;
-
-            // Check for video-related iframes/embeds
-            const iframes = document.querySelectorAll('iframe');
-            for (const iframe of iframes) {
-                const src = iframe.src || '';
-                if (src.includes('youtube.com') || src.includes('googlevideo.com') || src.includes('video')) {
-                    return false;
-                }
-            }
-
-            // Check for play buttons
-            const playButtons = document.querySelectorAll('[aria-label*="play" i], .play-button, .ytp-play-button, .ytp-large-play-button');
-            if (playButtons.length > 0) return false;
-
-            // If none of the above, it's a text ad
-            return true;
-        });
-
-        if (isTextAd) {
-            console.log(`  📝 Text Ad detected - skipping (saving time)`);
-            await page.close();
-            return {
-                advertiserName: 'SKIP',
-                appName: 'SKIP',
-                storeLink: 'SKIP',
-                videoId: 'SKIP'
-            };
-        }
-
         // Skip Apple Store ads early if we already have the store link
         // Only process Play Store video ads
         if (existingStoreLink && existingStoreLink.includes('apps.apple.com')) {
