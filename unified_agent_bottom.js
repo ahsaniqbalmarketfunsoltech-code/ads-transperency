@@ -2,7 +2,7 @@
  * UNIFIED GOOGLE ADS TRANSPARENCY AGENT (BOTTOM TO TOP)
  * =====================================
  * Combines app_data_agent.js + agent.js in ONE VISIT per URL
- * Processes rows from BOTTOM to TOP
+ * Processes rows from BOTTOM to TOP in batches
  * 
  * Sheet Structure:
  *   Column A: Advertiser Name
@@ -24,18 +24,19 @@ const fs = require('fs');
 // CONFIGURATION
 // ============================================
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
-const SHEET_NAME = 'Sheet1';
+const SHEET_NAME = process.env.SHEET_NAME || 'Sheet1'; // Default to Sheet1
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 2; // Reduced for better Play Store link extraction
+const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 1000; // Rows to load per batch
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 2; // User requested 2 for accuracy
 const MAX_WAIT_TIME = 60000;
-const MAX_RETRIES = 4;
+const MAX_RETRIES = 3; // User requested 3 retries max
 const POST_CLICK_WAIT = 6000;
 const RETRY_WAIT_MULTIPLIER = 1.25;
-const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 2000; // Increased staggered starts for better reliability
-const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 5000;
+const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
+const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 8000; // Increased for better Play Store link extraction
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 15000; // Increased for better Play Store link extraction
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000; // Balanced: faster but safe
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 10000; // Balanced: faster but safe
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
@@ -89,41 +90,110 @@ async function getGoogleSheetsClient() {
     return google.sheets({ version: 'v4', auth: authClient });
 }
 
-async function getUrlData(sheets) {
-    const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:E`,
-    });
-    const rows = response.data.values || [];
+async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     const toProcess = [];
 
-    // Process from bottom to top (reverse order)
-    for (let i = rows.length - 1; i >= 1; i--) {
-        const row = rows[i];
-        const url = row[1]?.trim() || '';
-        const storeLink = row[2]?.trim() || '';
-        const appName = row[3]?.trim() || '';
-        const videoId = row[4]?.trim() || '';
+    // First, get the total number of rows by loading a large range
+    // We'll use a large range to find the last row, then work backwards
+    console.log(`📊 Finding total rows and loading data from bottom to top in batches of ${batchSize} rows...`);
 
-        if (!url) continue;
+    // Get a large range to find the last row (start from row 1, get up to 10000 rows)
+    let totalRows = 0;
+    try {
+        const testResponse = await sheets.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `${SHEET_NAME}!A1:E10000`, // Large range to find total rows
+        });
+        const allRows = testResponse.data.values || [];
+        totalRows = allRows.length;
+        console.log(`  ✓ Found ${totalRows} total rows in sheet`);
+    } catch (error) {
+        console.error(`  ⚠️ Error finding total rows: ${error.message}`);
+        // Fallback: try to get rows in batches from bottom
+        totalRows = 100000; // Assume large number, will stop when no more data
+    }
 
-        const needsMetadata = !storeLink || !appName;
-        const hasValidStoreLink = storeLink &&
-            storeLink !== 'NOT_FOUND' &&
-            (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
-        const needsVideoId = hasValidStoreLink && !videoId;
+    if (totalRows <= 1) {
+        console.log(`📊 No data rows found\n`);
+        return toProcess;
+    }
 
-        if (needsMetadata || needsVideoId) {
-            toProcess.push({
-                url,
-                rowIndex: i,
-                needsMetadata,
-                needsVideoId,
-                existingStoreLink: storeLink
+    // Process from bottom to top in batches
+    let endRow = totalRows; // Start from the last row
+    let hasMoreData = true;
+    let totalProcessed = 0;
+
+    while (hasMoreData && endRow > 1) {
+        try {
+            // Calculate start row for this batch (working backwards)
+            const startRow = Math.max(2, endRow - batchSize + 1); // Row 2 is first data row (skip header)
+            const range = `${SHEET_NAME}!A${startRow}:E${endRow}`;
+
+            const response = await sheets.spreadsheets.values.get({
+                spreadsheetId: SPREADSHEET_ID,
+                range: range,
             });
+
+            const rows = response.data.values || [];
+
+            if (rows.length === 0) {
+                hasMoreData = false;
+                break;
+            }
+
+            // Process rows in reverse order (from bottom to top within this batch)
+            for (let i = rows.length - 1; i >= 0; i--) {
+                const row = rows[i];
+                const actualRowIndex = startRow + i - 1; // Actual row number in sheet (0-indexed from startRow)
+                const url = row[1]?.trim() || '';
+                const storeLink = row[2]?.trim() || '';
+                const appName = row[3]?.trim() || '';
+                const videoId = row[4]?.trim() || '';
+
+                if (!url) continue;
+
+                const needsMetadata = !storeLink || !appName;
+                const hasValidStoreLink = storeLink &&
+                    storeLink !== 'NOT_FOUND' &&
+                    (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
+                const needsVideoId = hasValidStoreLink && !videoId;
+
+                if (needsMetadata || needsVideoId) {
+                    toProcess.push({
+                        url,
+                        rowIndex: actualRowIndex,
+                        needsMetadata,
+                        needsVideoId,
+                        existingStoreLink: storeLink
+                    });
+                }
+            }
+
+            totalProcessed += rows.length;
+            console.log(`  ✓ Processed ${totalProcessed} rows (from bottom), found ${toProcess.length} to process`);
+
+            // Move to next batch (going backwards)
+            endRow = startRow - 1;
+
+            // If we've reached row 1 (header), we're done
+            if (endRow <= 1) {
+                hasMoreData = false;
+            } else {
+                // Small delay between batches to avoid rate limits
+                await sleep(100);
+            }
+        } catch (error) {
+            console.error(`  ⚠️ Error loading batch ending at row ${endRow}: ${error.message}`);
+            // If error, try to continue with next batch (move backwards)
+            endRow -= batchSize;
+            if (endRow <= 1) {
+                hasMoreData = false;
+            }
+            await sleep(500); // Wait a bit longer on error
         }
     }
 
+    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing (from bottom to top)\n`);
     return toProcess;
 }
 
@@ -297,57 +367,26 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // Capture video ID from googlevideo.com requests
         if (requestUrl.includes('googlevideo.com/videoplayback')) {
-            try {
-                const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-                const id = urlParams.get('id');
-                if (id && /^[a-f0-9]{16,18}$/.test(id)) {
-                    capturedVideoId = id;
-                }
-            } catch (e) {}
+            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
+            const id = urlParams.get('id');
+            if (id && /^[a-f0-9]{18}$|^[a-f0-9]{16}$/.test(id)) {
+                capturedVideoId = id;
+            }
         }
-        // Capture from YouTube embeds (multiple patterns)
-        else if (requestUrl.includes('youtube.com/embed/') || requestUrl.includes('youtube.com/v/')) {
-            const match = requestUrl.match(/\/(?:embed|v)\/([a-zA-Z0-9_-]{11})/);
+        // Capture from YouTube embeds
+        else if (requestUrl.includes('youtube.com/embed/')) {
+            const match = requestUrl.match(/\/embed\/([^?]+)/);
             if (match && match[1]) {
                 capturedVideoId = match[1];
             }
         }
-        // Capture from YouTube watch URLs
-        else if (requestUrl.includes('youtube.com/watch')) {
-            try {
-                const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-                const v = urlParams.get('v') || urlParams.get('video_id');
-                if (v && v.length >= 11 && /^[a-zA-Z0-9_-]{11,}$/.test(v)) {
-                    capturedVideoId = v;
-                }
-            } catch (e) {}
-        }
-        // Capture from YouTube get_video_info
-        else if (requestUrl.includes('youtube.com/get_video_info')) {
-            try {
-                const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-                const v = urlParams.get('video_id') || urlParams.get('v');
-                if (v && v.length >= 11) {
-                    capturedVideoId = v;
-                }
-            } catch (e) {}
-        }
-        // Capture from youtu.be short URLs
-        else if (requestUrl.includes('youtu.be/')) {
-            const match = requestUrl.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
-            if (match && match[1]) {
-                capturedVideoId = match[1];
+        // Capture from YouTube get_video_info or watch
+        else if (requestUrl.includes('youtube.com/watch') || requestUrl.includes('youtube.com/get_video_info')) {
+            const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
+            const v = urlParams.get('video_id') || urlParams.get('v');
+            if (v && v.length >= 11) {
+                capturedVideoId = v;
             }
-        }
-        // Capture from YouTube API requests
-        else if (requestUrl.includes('youtube.com/api/stats') || requestUrl.includes('youtube.com/youtubei/')) {
-            try {
-                const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
-                const v = urlParams.get('video_id') || urlParams.get('v') || urlParams.get('videoId');
-                if (v && v.length >= 11 && /^[a-zA-Z0-9_-]{11,}$/.test(v)) {
-                    capturedVideoId = v;
-                }
-            } catch (e) {}
         }
 
         const resourceType = request.resourceType();
@@ -415,12 +454,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (increased for better Play Store link extraction)
-        const baseWait = 6000 + Math.random() * 3000; // Increased: 6000-9000ms for better iframe loading
+        // Wait for dynamic elements to settle (increased for large datasets)
+        const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
-        // Additional wait specifically for iframes to render (critical for Play Store links)
+        // Additional wait specifically for iframes to render (critical for Play Store links in large datasets)
         try {
             await page.evaluate(async () => {
                 const iframes = document.querySelectorAll('iframe');
@@ -431,7 +470,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         const checkLoaded = () => {
                             loaded++;
                             if (loaded >= totalIframes) {
-                                setTimeout(resolve, 3000); // Increased: Extra time after all iframes load
+                                setTimeout(resolve, 1500); // Extra time after all iframes load
                             }
                         };
                         iframes.forEach(iframe => {
@@ -440,8 +479,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     checkLoaded();
                                 } else {
                                     iframe.onload = checkLoaded;
-                                    // Increased timeout: 8 seconds per iframe for Play Store content
-                                    setTimeout(checkLoaded, 8000);
+                                    // Timeout after 4 seconds per iframe
+                                    setTimeout(checkLoaded, 4000);
                                 }
                             } catch (e) {
                                 // Cross-origin iframe, count as loaded
@@ -455,7 +494,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             });
         } catch (e) {
             // If iframe check fails, wait a bit anyway
-            await sleep(2000);
+            await sleep(1000);
         }
 
         // Random mouse movements for more human-like behavior
@@ -471,6 +510,47 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 await sleep(200 + Math.random() * 300);
             }
         } catch (e) { /* Ignore if CDP fails */ }
+
+        // =====================================================
+        // EARLY TEXT AD DETECTION - Skip text ads entirely
+        // Only process video ads for Play Store links
+        // =====================================================
+        const isTextAd = await page.evaluate(() => {
+            // Check for video elements
+            const videoEl = document.querySelector('video');
+            if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return false;
+
+            // Check page text for video indicators
+            const bodyText = document.body.innerText.toLowerCase();
+            if (bodyText.includes('format: video') || bodyText.includes('video ad')) return false;
+
+            // Check for video-related iframes/embeds
+            const iframes = document.querySelectorAll('iframe');
+            for (const iframe of iframes) {
+                const src = iframe.src || '';
+                if (src.includes('youtube.com') || src.includes('googlevideo.com') || src.includes('video')) {
+                    return false;
+                }
+            }
+
+            // Check for play buttons
+            const playButtons = document.querySelectorAll('[aria-label*="play" i], .play-button, .ytp-play-button, .ytp-large-play-button');
+            if (playButtons.length > 0) return false;
+
+            // If none of the above, it's a text ad
+            return true;
+        });
+
+        if (isTextAd) {
+            console.log(`  📝 Text Ad detected - skipping (saving time)`);
+            await page.close();
+            return {
+                advertiserName: 'SKIP',
+                appName: 'SKIP',
+                storeLink: 'SKIP',
+                videoId: 'SKIP'
+            };
+        }
 
         // Skip Apple Store ads early if we already have the store link
         // Only process Play Store video ads
@@ -510,10 +590,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         // =====================================================
         // PHASE 1: METADATA EXTRACTION
         // =====================================================
+        let mainPageInfo = null;
         if (needsMetadata) {
             console.log(`  📊 Extracting metadata...`);
 
-            const mainPageInfo = await page.evaluate(() => {
+            mainPageInfo = await page.evaluate(() => {
                 const getSafeText = (sel) => {
                     const el = document.querySelector(sel);
                     if (!el) return null;
@@ -553,12 +634,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             const blacklistName = mainPageInfo.blacklist;
             result.advertiserName = mainPageInfo.advertiserName;
 
-            // Wait a bit more for iframes to fully load before extraction
-            await sleep(2000 + Math.random() * 2000);
-            
             const frames = page.frames();
-            console.log(`  🔍 Checking ${frames.length} frames for Play Store links...`);
-            
             for (const frame of frames) {
                 try {
                     const frameData = await frame.evaluate((blacklist) => {
@@ -637,20 +713,16 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
                         // =====================================================
                         // EXTRACTION - Find FIRST element with BOTH name + store link
-                        // Enhanced selectors for better Play Store link detection
+                        // Uses PRECISE selectors from app_data_agent.js
                         // =====================================================
                         const appNameSelectors = [
                             'a[data-asoch-targets*="ochAppName"]',
                             'a[data-asoch-targets*="appname" i]',
                             'a[data-asoch-targets*="rrappname" i]',
                             'a[class*="short-app-name"]',
-                            '.short-app-name a',
-                            'a[href*="play.google.com"]',
-                            'a[href*="apps.apple.com"]',
-                            'a[href*="itunes.apple.com"]'
+                            '.short-app-name a'
                         ];
 
-                        // First pass: Look for links with both name and href
                         for (const selector of appNameSelectors) {
                             const elements = root.querySelectorAll(selector);
                             for (const el of elements) {
@@ -667,50 +739,17 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
-                        // Second pass: Search ALL links for Play Store/App Store URLs (more comprehensive)
-                        if (!data.storeLink) {
-                            const allLinks = root.querySelectorAll('a[href]');
-                            for (const link of allLinks) {
-                                const href = link.getAttribute('href') || link.href || '';
-                                const storeLink = extractStoreLink(href);
-                                if (storeLink) {
-                                    // Try to get app name from nearby elements
-                                    let nearbyName = null;
-                                    const parent = link.parentElement;
-                                    if (parent) {
-                                        nearbyName = cleanAppName(parent.innerText || parent.textContent || '');
-                                    }
-                                    if (!nearbyName) {
-                                        const siblings = Array.from(link.parentElement?.children || []);
-                                        for (const sibling of siblings) {
-                                            nearbyName = cleanAppName(sibling.innerText || sibling.textContent || '');
-                                            if (nearbyName && nearbyName.toLowerCase() !== blacklist) break;
-                                        }
-                                    }
-                                    if (nearbyName && nearbyName.toLowerCase() !== blacklist) {
-                                        return { appName: nearbyName, storeLink, isVideo: true, isHidden: false };
-                                    } else if (storeLink) {
-                                        data.storeLink = storeLink;
-                                    }
-                                }
-                            }
-                        }
-
                         // Backup: Install button for link
                         if (data.appName && !data.storeLink) {
                             const installSels = [
                                 'a[data-asoch-targets*="ochButton"]',
                                 'a[data-asoch-targets*="Install" i]',
-                                'a[aria-label*="Install" i]',
-                                'button[aria-label*="Install" i]',
-                                'a[href*="play.google.com"]',
-                                'a[href*="apps.apple.com"]'
+                                'a[aria-label*="Install" i]'
                             ];
                             for (const sel of installSels) {
                                 const el = root.querySelector(sel);
-                                if (el) {
-                                    const href = el.getAttribute('href') || el.href || '';
-                                    const storeLink = extractStoreLink(href);
+                                if (el && el.href) {
+                                    const storeLink = extractStoreLink(el.href);
                                     if (storeLink) {
                                         data.storeLink = storeLink;
                                         data.isVideo = true;
@@ -745,20 +784,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     if (frameData.isHidden) continue;
 
                     // If we found BOTH app name AND store link, use this immediately (high confidence)
-                    if (frameData.appName && frameData.storeLink && result.storeLink === 'NOT_FOUND') {
+                    if (frameData.appName && frameData.storeLink && result.appName === 'NOT_FOUND') {
                         result.appName = cleanName(frameData.appName);
                         result.storeLink = frameData.storeLink;
                         console.log(`  ✓ Found: ${result.appName} -> ${result.storeLink.substring(0, 60)}...`);
                         break; // We have both, stop searching
-                    }
-
-                    // If we found store link but no name yet, keep it
-                    if (frameData.storeLink && result.storeLink === 'NOT_FOUND') {
-                        result.storeLink = frameData.storeLink;
-                        if (frameData.appName) {
-                            result.appName = cleanName(frameData.appName);
-                        }
-                        console.log(`  ✓ Found store link: ${result.storeLink.substring(0, 60)}...`);
                     }
 
                     // If we only found name (no link), store it but keep looking
@@ -767,33 +797,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         // DON'T break - continue looking for a frame with BOTH name+link
                     }
                 } catch (e) { }
-            }
-
-            // Final fallback: Search main page for Play Store links (not just iframes)
-            if (result.storeLink === 'NOT_FOUND') {
-                try {
-                    const mainPageLinks = await page.evaluate(() => {
-                        const links = Array.from(document.querySelectorAll('a[href]'));
-                        for (const link of links) {
-                            const href = link.getAttribute('href') || link.href || '';
-                            if (href.includes('play.google.com/store/apps') && href.includes('id=')) {
-                                const match = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
-                                if (match && match[1]) return match[1];
-                            }
-                            if ((href.includes('apps.apple.com') || href.includes('itunes.apple.com')) && href.includes('/app/')) {
-                                const match = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
-                                if (match && match[1]) return match[1];
-                            }
-                        }
-                        return null;
-                    });
-                    if (mainPageLinks) {
-                        result.storeLink = mainPageLinks;
-                        console.log(`  ✓ Found store link on main page: ${result.storeLink.substring(0, 60)}...`);
-                    }
-                } catch (e) {
-                    console.log(`  ⚠️ Main page link search failed: ${e.message}`);
-                }
             }
 
             // Final fallback from Meta/Title
@@ -809,54 +812,21 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // =====================================================
         // PHASE 2: VIDEO ID EXTRACTION
-        // Extract video IDs from ALL video ads (not just Play Store)
-        // Apple apps are SKIPPED (no Google video IDs)
+        // Only extract for Play Store video ads
+        // Text ads and Apple Store ads already skipped earlier
         // =====================================================
         const finalStoreLink = result.storeLink !== 'SKIP' ? result.storeLink : existingStoreLink;
         const isPlayStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('play.google.com');
         const isAppleStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('apps.apple.com');
 
-        // Check if this is a video ad (regardless of store link)
-        const isVideoAd = await page.evaluate(() => {
-            // Check for video element
-            const videoEl = document.querySelector('video');
-            if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
-            
-            // Check page text for video indicators
-            const bodyText = document.body.innerText.toLowerCase();
-            if (bodyText.includes('format: video') || bodyText.includes('video ad')) return true;
-            
-            // Check for YouTube iframes
-            const iframes = document.querySelectorAll('iframe');
-            for (const iframe of iframes) {
-                const src = iframe.src || '';
-                if (src.includes('youtube.com') || src.includes('youtu.be')) return true;
-            }
-            
-            // Check for video-related classes/attributes
-            const videoSelectors = [
-                '[class*="video"]',
-                '[class*="player"]',
-                '[data-video]',
-                '[id*="video"]',
-                '[id*="player"]'
-            ];
-            for (const sel of videoSelectors) {
-                const el = document.querySelector(sel);
-                if (el && el.offsetWidth > 50 && el.offsetHeight > 50) return true;
-            }
-            
-            return false;
-        });
-
-        // SPEED: Apple ads skip video extraction instantly
+        // Skip Apple Store ads (shouldn't reach here if we had existing link, but check anyway)
         if (isAppleStore) {
             result.videoId = 'SKIP';
-            console.log(`  🍏 Apple App - skipping video (instant)`);
+            console.log(`  🍏 Apple App - skipping video`);
         }
-        // Extract video ID for ALL video ads (not just Play Store)
-        else if ((isVideoAd || needsVideoId) && (needsVideoId || needsMetadata)) {
-            console.log(`  🎬 Extracting Video ID (Video ad detected: ${isVideoAd})...`);
+        // Only extract video ID for Play Store video ads
+        else if (isPlayStore && (needsVideoId || needsMetadata)) {
+            console.log(`  🎬 Extracting Video ID...`);
 
             // Find and click play button (EXACT from agent.js)
             const playButtonInfo = await page.evaluate(() => {
@@ -1067,8 +1037,9 @@ async function extractWithRetry(item, browser) {
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-    const PAGES_PER_BROWSER = 15; // Reduced for better reliability
+    const PAGES_PER_BROWSER = 30; // Balanced: faster but safe
     let currentIndex = 0;
+    let consecutiveSuccessBatches = 0;
 
     while (currentIndex < toProcess.length) {
         if (Date.now() - sessionStartTime > MAX_RUNTIME) {
@@ -1120,7 +1091,7 @@ async function extractWithRetry(item, browser) {
         let sessionProcessed = 0;
         let blocked = false;
         // Reset adaptive counter for each browser session
-        let consecutiveSuccessBatches = 0;
+        consecutiveSuccessBatches = 0;
 
         while (sessionProcessed < currentSessionSize && !blocked) {
             const batchSize = Math.min(CONCURRENT_PAGES, currentSessionSize - sessionProcessed);
