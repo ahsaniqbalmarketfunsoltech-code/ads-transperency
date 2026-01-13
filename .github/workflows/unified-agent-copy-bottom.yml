@@ -126,9 +126,9 @@ jobs:
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/unified-agent-copy-bottom.yml")
           
-          WORKFLOW_ID=$(echo "$WORKFLOW_RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
+          WORKFLOW_ID=$(echo "$WORKFLOW_RESPONSE" | jq '.id')
           
-          if [ -z "$WORKFLOW_ID" ]; then
+          if [ "$WORKFLOW_ID" = "null" ] || [ -z "$WORKFLOW_ID" ]; then
             echo "❌ Failed to get workflow ID. Response: $WORKFLOW_RESPONSE"
             exit 1
           fi
