@@ -152,13 +152,13 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
 
                 if (!url) continue;
 
-                const needsMetadata = !storeLink || !appName;
+                const needsMetadata = !storeLink || !appName || storeLink === 'NOT_FOUND' || appName === 'NOT_FOUND';
                 const hasValidStoreLink = storeLink &&
                     storeLink !== 'NOT_FOUND' &&
                     (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
-                const needsVideoId = hasValidStoreLink && !videoId;
+                const needsVideoId = hasValidStoreLink && (!videoId || videoId === 'NOT_FOUND');
 
-                if (needsMetadata || needsVideoId) {
+                if (needsMetadata || (needsVideoId && hasValidStoreLink)) {
                     toProcess.push({
                         url,
                         rowIndex: actualRowIndex,
@@ -720,7 +720,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             'a[data-asoch-targets*="appname" i]',
                             'a[data-asoch-targets*="rrappname" i]',
                             'a[class*="short-app-name"]',
-                            '.short-app-name a'
+                            '.short-app-name a',
+                            'a[href*="play.google.com"]',
+                            'a[href*="apps.apple.com"]',
+                            'a[href*="itunes.apple.com"]'
                         ];
 
                         for (const selector of appNameSelectors) {
@@ -739,12 +742,44 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
+                        // Second pass: Search ALL links for Play Store/App Store URLs (more comprehensive)
+                        if (!data.storeLink) {
+                            const allLinks = root.querySelectorAll('a[href]');
+                            for (const link of allLinks) {
+                                const href = link.getAttribute('href') || link.href || '';
+                                const storeLink = extractStoreLink(href);
+                                if (storeLink) {
+                                    // Try to get app name from nearby elements
+                                    let nearbyName = null;
+                                    const parent = link.parentElement;
+                                    if (parent) {
+                                        nearbyName = cleanAppName(parent.innerText || parent.textContent || '');
+                                    }
+                                    if (!nearbyName) {
+                                        const siblings = Array.from(link.parentElement?.children || []);
+                                        for (const sibling of siblings) {
+                                            nearbyName = cleanAppName(sibling.innerText || sibling.textContent || '');
+                                            if (nearbyName && nearbyName.toLowerCase() !== blacklist) break;
+                                        }
+                                    }
+                                    if (nearbyName && nearbyName.toLowerCase() !== blacklist) {
+                                        return { appName: nearbyName, storeLink, isVideo: true, isHidden: false };
+                                    } else if (storeLink) {
+                                        data.storeLink = storeLink;
+                                    }
+                                }
+                            }
+                        }
+
                         // Backup: Install button for link
                         if (data.appName && !data.storeLink) {
                             const installSels = [
                                 'a[data-asoch-targets*="ochButton"]',
                                 'a[data-asoch-targets*="Install" i]',
-                                'a[aria-label*="Install" i]'
+                                'a[aria-label*="Install" i]',
+                                'button[aria-label*="Install" i]',
+                                'a[href*="play.google.com"]',
+                                'a[href*="apps.apple.com"]'
                             ];
                             for (const sel of installSels) {
                                 const el = root.querySelector(sel);
@@ -807,6 +842,33 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         result.appName = title.split(' - ')[0].split('|')[0].trim();
                     }
                 } catch (e) { }
+            }
+
+            // Final fallback: Search main page for Play Store links (not just iframes)
+            if (result.storeLink === 'NOT_FOUND') {
+                try {
+                    const mainPageLinks = await page.evaluate(() => {
+                        const links = Array.from(document.querySelectorAll('a[href]'));
+                        for (const link of links) {
+                            const href = link.getAttribute('href') || link.href || '';
+                            if (href.includes('play.google.com/store/apps') && href.includes('id=')) {
+                                const match = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                                if (match && match[1]) return match[1];
+                            }
+                            if ((href.includes('apps.apple.com') || href.includes('itunes.apple.com')) && href.includes('/app/')) {
+                                const match = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
+                                if (match && match[1]) return match[1];
+                            }
+                        }
+                        return null;
+                    });
+                    if (mainPageLinks) {
+                        result.storeLink = mainPageLinks;
+                        console.log(`  ✓ Found store link on main page: ${result.storeLink.substring(0, 60)}...`);
+                    }
+                } catch (e) {
+                    console.log(`  ⚠️ Main page link search failed: ${e.message}`);
+                }
             }
         }
 
