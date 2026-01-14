@@ -1171,14 +1171,15 @@ async function extractWithRetry(item, browser) {
                     console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
                 });
 
-                // Separate successful results from blocked ones
+                // Separate successful results from blocked ones (for logging)
                 const successfulResults = results.filter(r => r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED');
                 const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
 
-                // Always write successful results to sheet (even if some were blocked)
-                if (successfulResults.length > 0) {
-                    await batchWriteToSheet(sheets, successfulResults);
-                    console.log(`  ✅ Wrote ${successfulResults.length} successful results to sheet`);
+                // WRITE ALL RESULTS TO SHEET (including blocked ones)
+                // This ensures blocked rows get marked and won't be reprocessed
+                if (results.length > 0) {
+                    await batchWriteToSheet(sheets, results);
+                    console.log(`  ✅ Wrote ${results.length} results to sheet (${successfulResults.length} successful, ${blockedResults.length} blocked)`);
                 }
 
                 // If any results were blocked, mark for browser rotation
