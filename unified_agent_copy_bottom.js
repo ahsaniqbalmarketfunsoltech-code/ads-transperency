@@ -93,41 +93,73 @@ async function getGoogleSheetsClient() {
 async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     const toProcess = [];
 
-    // First, get the total number of rows by loading a large range
-    // We'll use a large range to find the last row, then work backwards
-    console.log(`📊 Finding total rows and loading data from bottom to top in batches of ${batchSize} rows...`);
+    // First, get the total number of rows using sheet metadata (supports 40,000+ rows)
+    // Then scan ALL rows from absolute bottom to top
+    console.log(`📊 Finding total rows and scanning ALL data from BOTTOM to TOP in batches of ${batchSize} rows...`);
 
     // Get the actual total row count using sheet metadata (supports 40,000+ rows)
     let totalRows = 0;
+    let metadataRowCount = 0;
     try {
         // Use spreadsheet metadata to get actual row count
         const sheetMetadata = await sheets.spreadsheets.get({
             spreadsheetId: SPREADSHEET_ID,
             ranges: [`${SHEET_NAME}`],
-            fields: 'sheets.properties.gridProperties.rowCount,sheets.data.rowData'
+            fields: 'sheets.properties.gridProperties.rowCount'
         });
 
-        // Get the row count from metadata
+        // Get the row count from metadata - this is our PRIMARY source of truth
         const sheetProps = sheetMetadata.data.sheets?.[0]?.properties?.gridProperties;
         if (sheetProps && sheetProps.rowCount) {
-            totalRows = sheetProps.rowCount;
-            console.log(`  ✓ Sheet metadata indicates ${totalRows} rows`);
+            metadataRowCount = sheetProps.rowCount;
+            console.log(`  ✓ Sheet metadata indicates ${metadataRowCount} total rows`);
         }
 
-        // However, rowCount includes empty rows, so we need to find the last row with data
-        // Get last column A value to determine actual data rows
-        const lastRowCheck = await sheets.spreadsheets.values.get({
-            spreadsheetId: SPREADSHEET_ID,
-            range: `${SHEET_NAME}!A:A`, // Get all of column A
-            majorDimension: 'COLUMNS'
-        });
+        // Use metadata row count as primary, but try to find last row with actual data
+        // by checking column B (URL column) from bottom up in chunks
+        // This handles cases where metadata rowCount includes empty rows
+        if (metadataRowCount > 0) {
+            totalRows = metadataRowCount;
 
-        const columnAValues = lastRowCheck.data.values?.[0] || [];
-        totalRows = columnAValues.length;
-        console.log(`  ✓ Found ${totalRows} total rows with data in sheet (including header)`);
+            // Try to find the actual last row with data by checking from bottom
+            // Check in reverse chunks of 1000 to find where data ends
+            let foundLastDataRow = false;
+            let checkEnd = metadataRowCount;
+
+            while (!foundLastDataRow && checkEnd > 1) {
+                const checkStart = Math.max(2, checkEnd - 1000);
+                try {
+                    const checkResponse = await sheets.spreadsheets.values.get({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: `${SHEET_NAME}!B${checkStart}:B${checkEnd}`,
+                    });
+                    const checkRows = checkResponse.data.values || [];
+
+                    // Find last non-empty row in this chunk
+                    for (let i = checkRows.length - 1; i >= 0; i--) {
+                        const cell = checkRows[i]?.[0]?.trim();
+                        if (cell && cell.length > 0) {
+                            totalRows = checkStart + i;
+                            foundLastDataRow = true;
+                            console.log(`  ✓ Found actual last data row: ${totalRows}`);
+                            break;
+                        }
+                    }
+
+                    if (!foundLastDataRow) {
+                        checkEnd = checkStart - 1;
+                    }
+                } catch (e) {
+                    // If error, assume this chunk has data and use metadata count
+                    foundLastDataRow = true;
+                }
+            }
+        }
+
+        console.log(`  ✓ Will scan ${totalRows} rows from BOTTOM (row ${totalRows}) to TOP (row 2)`);
     } catch (error) {
         console.error(`  ⚠️ Error finding total rows: ${error.message}`);
-        // Fallback: try to get rows in batches from bottom
+        // Fallback: try to get rows in batches from a large assumed number
         totalRows = 100000; // Assume large number, will stop when no more data
     }
 
