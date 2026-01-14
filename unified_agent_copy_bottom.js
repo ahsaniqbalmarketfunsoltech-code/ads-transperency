@@ -200,23 +200,36 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 const appName = row[3]?.trim() || '';
                 const videoId = row[4]?.trim() || '';
 
+                // Skip if no URL
                 if (!url) continue;
 
-                const needsMetadata = !storeLink || !appName;
-                const hasValidStoreLink = storeLink &&
-                    storeLink !== 'NOT_FOUND' &&
-                    (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
-                const needsVideoId = hasValidStoreLink && !videoId;
+                // Skip rows that already have ANY value in column C (storeLink)
+                // This means they've been processed (whether SKIP, BLOCKED, NOT_FOUND, or actual data)
+                if (storeLink) {
+                    // Only exception: if it has a valid Play Store link but missing video ID
+                    const hasValidStoreLink = storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com');
+                    const needsVideoId = hasValidStoreLink && !videoId;
 
-                if (needsMetadata || needsVideoId) {
-                    toProcess.push({
-                        url,
-                        rowIndex: actualRowIndex,
-                        needsMetadata,
-                        needsVideoId,
-                        existingStoreLink: storeLink
-                    });
+                    if (needsVideoId) {
+                        toProcess.push({
+                            url,
+                            rowIndex: actualRowIndex,
+                            needsMetadata: false,
+                            needsVideoId: true,
+                            existingStoreLink: storeLink
+                        });
+                    }
+                    continue; // Skip - already has data in column C
                 }
+
+                // Row has no storeLink - needs processing
+                toProcess.push({
+                    url,
+                    rowIndex: actualRowIndex,
+                    needsMetadata: true,
+                    needsVideoId: false,
+                    existingStoreLink: ''
+                });
             }
 
             totalProcessed += rows.length;
@@ -256,18 +269,26 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
     const data = [];
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId }) => {
         const rowNum = rowIndex + 1;
-        if (advertiserName && advertiserName !== 'SKIP') {
+
+        // WRITE EVERYTHING - whatever data we get, write it to the sheet
+        // This ensures every processed row gets marked with something
+
+        // Write advertiser name (if we have any value)
+        if (advertiserName) {
             data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
         }
-        if (storeLink && storeLink !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLink]] });
-        }
-        if (appName && appName !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName]] });
-        }
-        if (videoId && videoId !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
-        }
+
+        // Write store link (always write something - even SKIP, BLOCKED, NOT_FOUND, ERROR)
+        const storeLinkValue = storeLink || 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLinkValue]] });
+
+        // Write app name (always write something)
+        const appNameValue = appName || 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appNameValue]] });
+
+        // Write video ID (always write something)
+        const videoIdValue = videoId || 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoIdValue]] });
 
         // Write Timestamp to Column M (Pakistan Time)
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
