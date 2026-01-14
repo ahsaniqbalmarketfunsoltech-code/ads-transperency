@@ -247,8 +247,11 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     return toProcess;
 }
 
-async function batchWriteToSheet(sheets, updates) {
+async function batchWriteToSheet(sheets, updates, retryCount = 0) {
     if (updates.length === 0) return;
+
+    const MAX_WRITE_RETRIES = 5;
+    const BASE_RETRY_DELAY = 5000; // 5 seconds base delay
 
     const data = [];
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId }) => {
@@ -280,7 +283,30 @@ async function batchWriteToSheet(sheets, updates) {
         });
         console.log(`  ✅ Wrote ${updates.length} results to sheet`);
     } catch (error) {
-        console.error(`  ❌ Write error:`, error.message);
+        const errorMessage = error.message || '';
+        const isRateLimit = errorMessage.includes('429') || errorMessage.includes('Quota') ||
+            errorMessage.includes('rate') || errorMessage.includes('RATE_LIMIT');
+        const isTransient = errorMessage.includes('503') || errorMessage.includes('500') ||
+            errorMessage.includes('UNAVAILABLE') || errorMessage.includes('timeout');
+
+        if ((isRateLimit || isTransient) && retryCount < MAX_WRITE_RETRIES) {
+            // Exponential backoff: 5s, 10s, 20s, 40s, 80s
+            const retryDelay = BASE_RETRY_DELAY * Math.pow(2, retryCount);
+            console.log(`  ⚠️ Sheet write error (${errorMessage.substring(0, 50)}...). Retry ${retryCount + 1}/${MAX_WRITE_RETRIES} in ${retryDelay / 1000}s...`);
+            await sleep(retryDelay);
+            return batchWriteToSheet(sheets, updates, retryCount + 1);
+        } else if (retryCount < MAX_WRITE_RETRIES) {
+            // Non-rate-limit error, still retry with shorter delay
+            const retryDelay = 3000;
+            console.log(`  ⚠️ Sheet write error: ${errorMessage}. Retry ${retryCount + 1}/${MAX_WRITE_RETRIES} in ${retryDelay / 1000}s...`);
+            await sleep(retryDelay);
+            return batchWriteToSheet(sheets, updates, retryCount + 1);
+        } else {
+            console.error(`  ❌ Sheet write FAILED after ${MAX_WRITE_RETRIES} retries: ${errorMessage}`);
+            // Log which rows failed so they can be identified
+            const failedRows = updates.map(u => u.rowIndex + 1).join(', ');
+            console.error(`  ❌ Failed rows: ${failedRows}`);
+        }
     }
 }
 
@@ -1180,6 +1206,16 @@ async function extractWithRetry(item, browser) {
                 if (results.length > 0) {
                     await batchWriteToSheet(sheets, results);
                     console.log(`  ✅ Wrote ${results.length} results to sheet (${successfulResults.length} successful, ${blockedResults.length} blocked)`);
+
+                    // Add cooldown after each write to prevent rate limits
+                    await sleep(1000 + Math.random() * 1000); // 1-2 second cooldown
+                }
+
+                // Progress status every 10 batches
+                if ((currentIndex / batchSize) % 10 === 0) {
+                    const elapsed = Math.floor((Date.now() - sessionStartTime) / 60000);
+                    const remaining = toProcess.length - currentIndex;
+                    console.log(`\n📊 PROGRESS: ${currentIndex}/${toProcess.length} processed (${remaining} remaining) | Runtime: ${elapsed} mins\n`);
                 }
 
                 // If any results were blocked, mark for browser rotation
