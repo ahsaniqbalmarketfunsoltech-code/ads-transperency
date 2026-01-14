@@ -97,16 +97,34 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     // We'll use a large range to find the last row, then work backwards
     console.log(`📊 Finding total rows and loading data from bottom to top in batches of ${batchSize} rows...`);
 
-    // Get a large range to find the last row (start from row 1, get up to 10000 rows)
+    // Get the actual total row count using sheet metadata (supports 40,000+ rows)
     let totalRows = 0;
     try {
-        const testResponse = await sheets.spreadsheets.values.get({
+        // Use spreadsheet metadata to get actual row count
+        const sheetMetadata = await sheets.spreadsheets.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `${SHEET_NAME}!A1:E10000`, // Large range to find total rows
+            ranges: [`${SHEET_NAME}`],
+            fields: 'sheets.properties.gridProperties.rowCount,sheets.data.rowData'
         });
-        const allRows = testResponse.data.values || [];
-        totalRows = allRows.length;
-        console.log(`  ✓ Found ${totalRows} total rows in sheet`);
+
+        // Get the row count from metadata
+        const sheetProps = sheetMetadata.data.sheets?.[0]?.properties?.gridProperties;
+        if (sheetProps && sheetProps.rowCount) {
+            totalRows = sheetProps.rowCount;
+            console.log(`  ✓ Sheet metadata indicates ${totalRows} rows`);
+        }
+
+        // However, rowCount includes empty rows, so we need to find the last row with data
+        // Get last column A value to determine actual data rows
+        const lastRowCheck = await sheets.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `${SHEET_NAME}!A:A`, // Get all of column A
+            majorDimension: 'COLUMNS'
+        });
+
+        const columnAValues = lastRowCheck.data.values?.[0] || [];
+        totalRows = columnAValues.length;
+        console.log(`  ✓ Found ${totalRows} total rows with data in sheet (including header)`);
     } catch (error) {
         console.error(`  ⚠️ Error finding total rows: ${error.message}`);
         // Fallback: try to get rows in batches from bottom
