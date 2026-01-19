@@ -94,7 +94,7 @@ async function getGoogleSheetsClient() {
 async function getUrlData(sheets) {
     const response = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:F`,
+        range: `${SHEET_NAME}!A:G`,
     });
     const rows = response.data.values || [];
     const toProcess = [];
@@ -111,21 +111,21 @@ async function getUrlData(sheets) {
 
         if (!url) continue;
 
-        const needsMetadata = !storeLink || !appName || !appSubtitle || !imageUrl;
-        const hasValidStoreLink = storeLink &&
-            storeLink !== 'NOT_FOUND' &&
-            (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
-        const needsVideoId = hasValidStoreLink && !videoId;
-
-        if (needsMetadata || needsVideoId) {
-            toProcess.push({
-                url,
-                rowIndex: i,
-                needsMetadata,
-                needsVideoId,
-                existingStoreLink: storeLink
-            });
+        // SKIP ONLY: Rows with Play Store link in Column C
+        const hasPlayStoreLink = storeLink && storeLink.includes('play.google.com');
+        if (hasPlayStoreLink) {
+            continue; // Skip - already has Play Store link
         }
+
+        // Process all other rows
+        const needsMetadata = !storeLink || !appName || !appSubtitle || !imageUrl;
+        toProcess.push({
+            url,
+            rowIndex: i,
+            needsMetadata,
+            needsVideoId: true,
+            existingStoreLink: storeLink
+        });
     }
 
     return toProcess;

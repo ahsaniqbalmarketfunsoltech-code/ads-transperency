@@ -207,31 +207,19 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 // Skip if no URL
                 if (!url) continue;
 
-                // Skip rows that already have ALL main values
-                // Now including appSubtitle in the check
-                if (storeLink && appName && appSubtitle && imageUrl) {
-                    // Only exception: if it has a valid Play Store link but missing video ID
-                    const hasValidStoreLink = storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com');
-                    const needsVideoId = hasValidStoreLink && !videoId;
-
-                    if (needsVideoId) {
-                        toProcess.push({
-                            url,
-                            rowIndex: actualRowIndex,
-                            needsMetadata: false,
-                            needsVideoId: true,
-                            existingStoreLink: storeLink
-                        });
-                    }
-                    continue; // Skip - already has data in column C
+                // SKIP ONLY: Rows with Play Store link in Column C
+                const hasPlayStoreLink = storeLink && storeLink.includes('play.google.com');
+                if (hasPlayStoreLink) {
+                    continue; // Skip - already has Play Store link
                 }
 
-                // Row has missing data - needs processing
+                // Process all other rows
+                const needsMetadata = !storeLink || !appName || !appSubtitle || !imageUrl;
                 toProcess.push({
                     url,
                     rowIndex: actualRowIndex,
-                    needsMetadata: !storeLink || !appName || !appSubtitle,
-                    needsVideoId: hasValidStoreLink && !videoId,
+                    needsMetadata,
+                    needsVideoId: true,
                     existingStoreLink: storeLink
                 });
             }
