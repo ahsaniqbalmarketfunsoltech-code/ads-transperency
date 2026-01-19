@@ -127,24 +127,35 @@ async function getUrlData(sheets) {
     return toProcess;
 }
 
-async function batchWriteToSheet(sheets, updates) {
+async function batchWriteToSheet(sheets, updates, retryCount = 0) {
     if (updates.length === 0) return;
+
+    const MAX_WRITE_RETRIES = 5;
+    const BASE_RETRY_DELAY = 5000; // 5 seconds base delay
 
     const data = [];
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId }) => {
         const rowNum = rowIndex + 1;
-        if (advertiserName && advertiserName !== 'SKIP') {
+
+        // WRITE EVERYTHING - whatever data we get, write it to the sheet
+        // This ensures every processed row gets marked with something
+
+        // Write advertiser name (if we have any value)
+        if (advertiserName) {
             data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
         }
-        if (storeLink && storeLink !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLink]] });
-        }
-        if (appName && appName !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName]] });
-        }
-        if (videoId && videoId !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
-        }
+
+        // Write store link (always write something - even SKIP, BLOCKED, NOT_FOUND, ERROR)
+        const storeLinkValue = storeLink || 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLinkValue]] });
+
+        // Write app name (always write something)
+        const appNameValue = appName || 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appNameValue]] });
+
+        // Write video ID (always write something)
+        const videoIdValue = videoId || 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoIdValue]] });
 
         // Write Timestamp to Column M (Pakistan Time)
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
@@ -160,7 +171,30 @@ async function batchWriteToSheet(sheets, updates) {
         });
         console.log(`  ✅ Wrote ${updates.length} results to sheet`);
     } catch (error) {
-        console.error(`  ❌ Write error:`, error.message);
+        const errorMessage = error.message || '';
+        const isRateLimit = errorMessage.includes('429') || errorMessage.includes('Quota') ||
+            errorMessage.includes('rate') || errorMessage.includes('RATE_LIMIT');
+        const isTransient = errorMessage.includes('503') || errorMessage.includes('500') ||
+            errorMessage.includes('UNAVAILABLE') || errorMessage.includes('timeout');
+
+        if ((isRateLimit || isTransient) && retryCount < MAX_WRITE_RETRIES) {
+            // Exponential backoff: 5s, 10s, 20s, 40s, 80s
+            const retryDelay = BASE_RETRY_DELAY * Math.pow(2, retryCount);
+            console.log(`  ⚠️ Sheet write error (${errorMessage.substring(0, 50)}...). Retry ${retryCount + 1}/${MAX_WRITE_RETRIES} in ${retryDelay / 1000}s...`);
+            await sleep(retryDelay);
+            return batchWriteToSheet(sheets, updates, retryCount + 1);
+        } else if (retryCount < MAX_WRITE_RETRIES) {
+            // Non-rate-limit error, still retry with shorter delay
+            const retryDelay = 3000;
+            console.log(`  ⚠️ Sheet write error: ${errorMessage}. Retry ${retryCount + 1}/${MAX_WRITE_RETRIES} in ${retryDelay / 1000}s...`);
+            await sleep(retryDelay);
+            return batchWriteToSheet(sheets, updates, retryCount + 1);
+        } else {
+            console.error(`  ❌ Sheet write FAILED after ${MAX_WRITE_RETRIES} retries: ${errorMessage}`);
+            // Log which rows failed so they can be identified
+            const failedRows = updates.map(u => u.rowIndex + 1).join(', ');
+            console.error(`  ❌ Failed rows: ${failedRows}`);
+        }
     }
 }
 
@@ -1150,14 +1184,18 @@ async function extractWithRetry(item, browser) {
                     console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
                 });
 
-                // Separate successful results from blocked ones
+                // Separate successful results from blocked ones (for logging)
                 const successfulResults = results.filter(r => r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED');
                 const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
 
-                // Always write successful results to sheet (even if some were blocked)
-                if (successfulResults.length > 0) {
-                    await batchWriteToSheet(sheets, successfulResults);
-                    console.log(`  ✅ Wrote ${successfulResults.length} successful results to sheet`);
+                // WRITE ALL RESULTS TO SHEET (including blocked ones)
+                // This ensures blocked rows get marked and won't be reprocessed
+                if (results.length > 0) {
+                    await batchWriteToSheet(sheets, results);
+                    console.log(`  ✅ Wrote ${results.length} results to sheet (${successfulResults.length} successful, ${blockedResults.length} blocked)`);
+
+                    // Add cooldown after each write to prevent rate limits
+                    await sleep(1000 + Math.random() * 1000); // 1-2 second cooldown
                 }
 
                 // If any results were blocked, mark for browser rotation
