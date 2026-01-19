@@ -14,11 +14,9 @@ on:
   repository_dispatch:
     types: [sheet_update]
   
-  # Backup schedule: Run 4 times a day (every 6 hours) if auto-restart fails
+  # Schedule: Run 4 times a day (every 6 hours)
   schedule:
     - cron: '0 */6 * * *'  # Every 6 hours: 12:00 AM, 6:00 AM, 12:00 PM, 6:00 PM UTC
-  
-  # Note: Workflow auto-restarts itself after 5 minutes (see last step for 24/7 continuous operation)
 
 concurrency:
   group: unified-agent-copy-bottom-continuous
@@ -30,7 +28,6 @@ jobs:
     timeout-minutes: 360  # 6 hours max runtime
     permissions:
       contents: read
-      actions: write  # Required to trigger workflow dispatch
     
     steps:
       - name: Check if workflow already running (backup schedule check)
@@ -112,45 +109,3 @@ jobs:
             *.log
             npm-debug.log*
           retention-days: 7
-      
-      - name: Wait 5 minutes then restart workflow (24/7 continuous)
-        if: always() && (github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true')
-        run: |
-          echo "⏳ Waiting 5 minutes before restarting workflow..."
-          sleep 300
-          echo "🔄 Triggering workflow restart..."
-          
-          # Get workflow ID
-          WORKFLOW_RESPONSE=$(curl -s \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/unified-agent-copy-bottom.yml")
-          
-          WORKFLOW_ID=$(echo "$WORKFLOW_RESPONSE" | jq '.id')
-          
-          if [ "$WORKFLOW_ID" = "null" ] || [ -z "$WORKFLOW_ID" ]; then
-            echo "❌ Failed to get workflow ID. Response: $WORKFLOW_RESPONSE"
-            exit 1
-          fi
-          
-          echo "📋 Workflow ID: $WORKFLOW_ID"
-          
-          # Trigger workflow dispatch
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-            -H "Accept: application/vnd.github.v3+json" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$WORKFLOW_ID/dispatches" \
-            -d "{\"ref\":\"${{ github.ref }}\"}")
-          
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          
-          if [ "$HTTP_CODE" = "204" ]; then
-            echo "✅ Workflow restart triggered successfully (HTTP $HTTP_CODE)"
-          else
-            echo "❌ Failed to trigger workflow restart (HTTP $HTTP_CODE)"
-            echo "Response: $BODY"
-            exit 1
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
