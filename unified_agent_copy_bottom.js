@@ -259,7 +259,7 @@ async function batchWriteToSheet(sheets, updates, retryCount = 0) {
     const BASE_RETRY_DELAY = 5000; // 5 seconds base delay
 
     const data = [];
-    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId, appSubtitle }) => {
+    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId, appSubtitle, imageUrl }) => {
         const rowNum = rowIndex + 1;
 
         // WRITE EVERYTHING - whatever data we get, write it to the sheet
@@ -1290,7 +1290,8 @@ async function extractWithRetry(item, browser) {
                         storeLink: data.storeLink,
                         appName: data.appName,
                         videoId: data.videoId,
-                        appSubtitle: data.appSubtitle
+                        appSubtitle: data.appSubtitle,
+                        imageUrl: data.imageUrl
                     };
                 }));
 
